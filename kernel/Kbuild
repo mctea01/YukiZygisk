@@ -14,6 +14,7 @@ yukizygisk-objs := \
 	core/control.o \
 	host/runtime.o \
 	host/root_impl.o \
+	host/mount.o \
 	host/policy.o \
 	host/policy_temp.o \
 	host/patch_text.o \

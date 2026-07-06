@@ -27,8 +27,10 @@ ddk build -- W=1
 
 This is a buildable extraction checkpoint, not a complete runtime replacement
 for the YukiSU-integrated module yet. See the source inventory for the
-remaining setresuid/syscall, SELinux policy, mount cleanup, and userspace
-control adapters.
+remaining daemon/userspace control, payload staging, and host-backend runtime
+validation work. The kernel-side setresuid tracepoint monitor, SELinux policy
+adapter, and mount cleanup adapter are present in the standalone LKM, but still
+need device-side validation before they can be treated as runtime parity.
 
 The standalone design target is root-implementation agnostic. KSU/YukiSU,
 KernelPatch, APatch, Magisk, and other high-CAP root environments should be
@@ -40,6 +42,12 @@ naming.
 The LSM interception point is now extracted into the standalone host layer:
 `selinux_bprm_committed_creds` is patched through a versioned adapter that uses
 the 6.12+ `static_calls_table` path or the older `security_hook_heads` path.
+
+Standalone mount cleanup is also owned by YukiZygisk now. `YZ_IOCTL_UMOUNT_PID`
+schedules target-context task work, scans that app's `/proc/self/mountinfo`,
+and detaches KSU/Magisk/APatch/YukiZygisk tagged mounts plus `/data/adb` module
+mounts itself. It must not depend on KSU's `kernel_umount` feature being
+enabled.
 
 The standalone control ABI is `YZ_IOCTL_*` with ioctl magic `'Y'` only. It does
 not accept the integrated YukiSU/YukiZygisk `KSU_IOCTL_YZ_*`/`'K'` ABI.

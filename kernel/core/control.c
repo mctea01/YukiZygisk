@@ -25,6 +25,7 @@
 #include "feature/zygote_ctl.h"
 #include "feature/zygote_nl.h"
 #include "feature/zygote_probe.h"
+#include "host/host.h"
 #include "uapi/yukizygisk.h"
 
 #define YZ_PER_USER_RANGE 100000
@@ -87,6 +88,15 @@ static int yz_ioctl_get_safemode(void __user *arg)
 	if (copy_to_user(arg, &cmd, sizeof(cmd)))
 		return -EFAULT;
 	return 0;
+}
+
+static int yz_ioctl_umount_pid(void __user *arg)
+{
+	struct yz_umount_pid_cmd cmd;
+
+	if (copy_from_user(&cmd, arg, sizeof(cmd)))
+		return -EFAULT;
+	return yz_host_umount_pid((pid_t)cmd.pid);
 }
 
 struct yz_unmap_tw {
@@ -270,8 +280,7 @@ static long yukizygisk_ioctl(struct file *file, unsigned int request,
 	case YZ_IOCTL_SET_YUKILINKER:
 		return yz_ioctl_set_yukilinker(uarg);
 	case YZ_IOCTL_UMOUNT_PID:
-		pr_info_once("yukizygisk: UMOUNT_PID needs host mount adapter\n");
-		return -EOPNOTSUPP;
+		return yz_ioctl_umount_pid(uarg);
 	case YZ_IOCTL_UNMAP_PID:
 		return yz_ioctl_unmap_pid(uarg);
 	case YZ_IOCTL_UNMAP_SELF:
