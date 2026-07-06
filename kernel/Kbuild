@@ -14,6 +14,8 @@ yukizygisk-objs := \
 	core/control.o \
 	host/runtime.o \
 	host/root_impl.o \
+	host/policy.o \
+	host/policy_temp.o \
 	host/patch_text.o \
 	host/lsm.o \
 	host/adapter.o \
@@ -23,6 +25,10 @@ yukizygisk-objs := \
 	feature/zygote_ctl.o
 
 ccflags-y += -I$(src)
+ccflags-y += -I$(srctree)/security/selinux
+ccflags-y += -I$(objtree)/security/selinux
+ccflags-y += -I$(srctree)/security/selinux/include
+ccflags-y += -I$(srctree)/security/selinux/ss
 ccflags-y += -Wno-declaration-after-statement
 ccflags-y += -Wno-missing-braces
 ccflags-y += -Wno-unused-function

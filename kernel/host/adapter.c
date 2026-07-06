@@ -16,6 +16,7 @@
 #include <linux/string.h>
 
 #include "host/host.h"
+#include "host/policy.h"
 #include "host/root_impl.h"
 #include "host/runtime.h"
 
@@ -31,9 +32,15 @@ int yz_host_init(void)
 	ret = yz_host_runtime_init();
 	if (ret)
 		return ret;
+	ret = yz_host_policy_init();
+	if (ret) {
+		yz_host_runtime_exit();
+		return ret;
+	}
 
 	yz_priv_cred = prepare_creds();
 	if (!yz_priv_cred) {
+		yz_host_policy_exit();
 		yz_host_runtime_exit();
 		return -ENOMEM;
 	}
@@ -49,6 +56,7 @@ void yz_host_exit(void)
 		abort_creds(yz_priv_cred);
 		yz_priv_cred = NULL;
 	}
+	yz_host_policy_exit();
 	yz_host_runtime_exit();
 }
 
@@ -137,29 +145,22 @@ void yz_host_revert_creds(const struct cred *old_cred)
 
 bool yz_host_is_zygote(const struct cred *cred)
 {
-	(void)cred;
-	return false;
+	return yz_host_policy_cred_has_type(cred, "zygote");
 }
 
 int yz_host_file_load_policy_allow_current(
 	struct file *file, struct yz_file_load_policy *state)
 {
-	(void)file;
-	if (state)
-		memset(state, 0, sizeof(*state));
-	return -EOPNOTSUPP;
+	return yz_host_policy_allow_file_current(file, state);
 }
 
 int yz_host_file_load_policy_allow_execmem_current(
 	struct yz_file_load_policy *state)
 {
-	if (state)
-		memset(state, 0, sizeof(*state));
-	return -EOPNOTSUPP;
+	return yz_host_policy_allow_execmem_current(state);
 }
 
 int yz_host_file_load_policy_restore(const struct yz_file_load_policy *state)
 {
-	(void)state;
-	return 0;
+	return yz_host_policy_restore(state);
 }
