@@ -1,0 +1,576 @@
+/* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0 */
+/*
+ * YukiZygisk - Root implementation detector.
+ *
+ * License: Author's work under Apache-2.0; when used as a kernel module
+ * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
+ *
+ * Author: Anatdx
+ */
+
+#include <linux/err.h>
+#include <linux/fcntl.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/kernel.h>
+#include <linux/list.h>
+#include <linux/mm.h>
+#include <linux/rbtree.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/string.h>
+#include <linux/vmalloc.h>
+#include <linux/workqueue.h>
+
+#include "host/root_impl.h"
+#include "host/runtime.h"
+
+#define YZ_KP_SYMBOL_NAME_LEN 32
+#define YZ_KP_SYMBOL_SIZE 48
+#define YZ_KP_SCAN_CHUNK PAGE_SIZE
+#define YZ_KP_SCAN_OVERLAP YZ_KP_SYMBOL_SIZE
+#define YZ_KP_MAX_SYMBOL_WALK 256
+#define YZ_KP_MAX_SCAN_RANGE (512UL * 1024 * 1024)
+#define YZ_KP_MAX_VMAP_RANGE (64UL * 1024 * 1024)
+#define YZ_KP_MAX_VMAP_AREAS 4096
+#define YZ_KP_VM_FLAGS 0x44UL
+#define YZ_KP_SU_NAME "su_get_path"
+
+struct yz_kp_symbol {
+	u64 addr;
+	u64 hash;
+	char name[YZ_KP_SYMBOL_NAME_LEN];
+};
+
+struct yz_kp_vmap_area {
+	unsigned long va_start;
+	unsigned long va_end;
+	struct rb_node rb_node;
+	struct list_head list;
+	union {
+		unsigned long subtree_max_size;
+		struct vm_struct *vm;
+	};
+	unsigned long flags;
+};
+
+struct yz_kp_vmap_pool {
+	struct list_head head;
+	unsigned long len;
+};
+
+struct yz_kp_rb_list {
+	struct rb_root root;
+	struct list_head head;
+	spinlock_t lock;
+};
+
+struct yz_kp_vmap_node {
+	struct yz_kp_vmap_pool pool[256];
+	spinlock_t pool_lock;
+	bool skip_populate;
+	struct yz_kp_rb_list busy;
+	struct yz_kp_rb_list lazy;
+	struct list_head purge_list;
+	struct work_struct purge_work;
+	unsigned long nr_purged;
+};
+
+int yz_root_mask;
+int yz_ksu_dispatcher_nr = -1;
+int yz_policy_owner_override = YZ_POLICY_OWNER_AUTO;
+bool yz_root_policy_allowed;
+yz_ksu_is_allow_uid_fn yz_ksu_is_allow_uid_ptr;
+yz_ksu_uid_should_umount_fn yz_ksu_uid_should_umount_ptr;
+yz_ksu_get_allow_list_fn yz_ksu_get_allow_list_ptr;
+
+const char *(*yz_ap_su_get_path)(void);
+int (*yz_ap_is_su_allow_uid)(uid_t uid);
+int (*yz_ap_su_allow_uid_nums)(void);
+int (*yz_ap_su_allow_uids)(int is_user, uid_t *out_uids, int out_num);
+int (*yz_ap_su_allow_uid_profile)(int is_user, uid_t uid,
+				  struct yz_ap_su_profile *profile);
+int (*yz_ap_get_mod_exclude)(uid_t uid);
+int (*yz_ap_list_mod_exclude)(uid_t *uids, int len);
+int (*yz_ap_read_kstorage)(int gid, long did, void *data, int offset,
+			   int len, bool data_is_user);
+int (*yz_ap_list_kstorage_ids)(int gid, long *ids, int idslen,
+			       bool data_is_user);
+
+static YZ_NOCFI struct file *yz_open_ro(const char *path)
+{
+	if (!yz_filp_open)
+		yz_filp_open = (void *)yz_lookup_callable_quiet("filp_open");
+	if (!yz_filp_open)
+		return ERR_PTR(-ENOENT);
+	return yz_filp_open(path, O_RDONLY, 0);
+}
+
+static YZ_NOCFI void yz_close_file(struct file *file)
+{
+	if (!yz_filp_close)
+		yz_filp_close = (void *)yz_lookup_callable_quiet("filp_close");
+	if (yz_filp_close)
+		yz_filp_close(file, NULL);
+	else
+		fput(file);
+}
+
+static void yz_ap_clear_symbols(void)
+{
+	yz_ap_su_get_path = NULL;
+	yz_ap_is_su_allow_uid = NULL;
+	yz_ap_su_allow_uid_nums = NULL;
+	yz_ap_su_allow_uids = NULL;
+	yz_ap_su_allow_uid_profile = NULL;
+	yz_ap_get_mod_exclude = NULL;
+	yz_ap_list_mod_exclude = NULL;
+	yz_ap_read_kstorage = NULL;
+	yz_ap_list_kstorage_ids = NULL;
+}
+
+static bool yz_kp_symbol_name_eq(const struct yz_kp_symbol *sym,
+				 const char *name)
+{
+	size_t len = strlen(name);
+
+	if (len >= YZ_KP_SYMBOL_NAME_LEN)
+		return false;
+	if (memcmp(sym->name, name, len) != 0)
+		return false;
+	return sym->name[len] == '\0';
+}
+
+static bool yz_kp_read_symbol(unsigned long entry, struct yz_kp_symbol *sym)
+{
+	if (!yz_valid_kernel_addr(entry))
+		return false;
+	return yz_kernel_read_nofault(sym, entry, sizeof(*sym));
+}
+
+static unsigned long yz_kp_lookup_near(unsigned long anchor, const char *name)
+{
+	struct yz_kp_symbol sym;
+	int i;
+
+	for (i = -YZ_KP_MAX_SYMBOL_WALK; i <= YZ_KP_MAX_SYMBOL_WALK; i++) {
+		unsigned long entry = anchor + i * YZ_KP_SYMBOL_SIZE;
+
+		if (!yz_kp_read_symbol(entry, &sym))
+			continue;
+		if (!yz_kp_symbol_name_eq(&sym, name))
+			continue;
+		if (!yz_valid_kernel_addr((unsigned long)sym.addr))
+			return 0;
+		return (unsigned long)sym.addr;
+	}
+
+	return 0;
+}
+
+static bool yz_kp_parse_table(unsigned long su_name_addr)
+{
+	unsigned long anchor = su_name_addr - offsetof(struct yz_kp_symbol, name);
+	struct yz_kp_symbol sym;
+	unsigned long addr;
+
+	if (!yz_kp_read_symbol(anchor, &sym) ||
+	    !yz_kp_symbol_name_eq(&sym, YZ_KP_SU_NAME) ||
+	    !yz_valid_kernel_addr((unsigned long)sym.addr))
+		return false;
+
+	addr = yz_kp_lookup_near(anchor, "su_allow_uid_profile");
+	if (!addr)
+		return false;
+	yz_ap_su_allow_uid_profile = (void *)addr;
+
+	addr = yz_kp_lookup_near(anchor, "get_ap_mod_exclude");
+	if (!addr)
+		return false;
+	yz_ap_get_mod_exclude = (void *)addr;
+
+	yz_ap_su_get_path = (void *)(unsigned long)sym.addr;
+	yz_ap_is_su_allow_uid =
+		(void *)yz_kp_lookup_near(anchor, "is_su_allow_uid");
+	yz_ap_su_allow_uid_nums =
+		(void *)yz_kp_lookup_near(anchor, "su_allow_uid_nums");
+	yz_ap_su_allow_uids =
+		(void *)yz_kp_lookup_near(anchor, "su_allow_uids");
+	yz_ap_list_mod_exclude =
+		(void *)yz_kp_lookup_near(anchor, "list_ap_mod_exclude");
+	yz_ap_read_kstorage =
+		(void *)yz_kp_lookup_near(anchor, "read_kstorage");
+	yz_ap_list_kstorage_ids =
+		(void *)yz_kp_lookup_near(anchor, "list_kstorage_ids");
+
+	pr_info("yukizygisk: APatch KP symbols detected: su_get_path=%px profile=%px exclude=%px\n",
+		yz_ap_su_get_path, yz_ap_su_allow_uid_profile,
+		yz_ap_get_mod_exclude);
+	return true;
+}
+
+static bool yz_kp_scan_chunk(unsigned long base, const char *buf, size_t len)
+{
+	size_t name_len = strlen(YZ_KP_SU_NAME);
+	size_t i;
+
+	if (len < name_len)
+		return false;
+
+	for (i = 0; i <= len - name_len; i++) {
+		if (buf[i] != YZ_KP_SU_NAME[0])
+			continue;
+		if (memcmp(buf + i, YZ_KP_SU_NAME, name_len) != 0)
+			continue;
+		if (yz_kp_parse_table(base + i))
+			return true;
+	}
+
+	return false;
+}
+
+static bool yz_kp_scan_range(unsigned long start, unsigned long end,
+			     const char *tag)
+{
+	char *buf;
+	unsigned long pos;
+
+	if (!yz_valid_kernel_addr(start) || !yz_valid_kernel_addr(end) ||
+	    end <= start || end - start > YZ_KP_MAX_SCAN_RANGE) {
+		pr_warn("yukizygisk: skip KP %s scan, bad range [%lx, %lx)\n",
+			tag, start, end);
+		return false;
+	}
+
+	buf = kmalloc(YZ_KP_SCAN_CHUNK + YZ_KP_SCAN_OVERLAP, GFP_KERNEL);
+	if (!buf)
+		return false;
+
+	for (pos = start; pos < end; pos += YZ_KP_SCAN_CHUNK) {
+		size_t len = min_t(unsigned long,
+				   YZ_KP_SCAN_CHUNK + YZ_KP_SCAN_OVERLAP,
+				   end - pos);
+
+		if (!yz_kernel_read_nofault(buf, pos, len))
+			continue;
+		if (yz_kp_scan_chunk(pos, buf, len)) {
+			kfree(buf);
+			pr_info("yukizygisk: APatch KP symbol table found in %s range [%lx, %lx)\n",
+				tag, start, end);
+			return true;
+		}
+	}
+
+	kfree(buf);
+	return false;
+}
+
+static bool yz_kp_scan_kernel_image(void)
+{
+	unsigned long start = yz_lookup_callable_quiet("_text");
+	unsigned long end = yz_lookup_callable_quiet("_end");
+
+	if (!yz_valid_kernel_addr(start))
+		start = yz_lookup_callable_quiet("_stext");
+
+	return yz_kp_scan_range(start, end, "kernel image");
+}
+
+static bool yz_kp_scan_vmap_list(unsigned long head_addr, const char *tag)
+{
+	struct yz_kp_vmap_area va;
+	struct list_head head;
+	unsigned long pos;
+	int count = 0;
+
+	if (!yz_valid_kernel_addr(head_addr) ||
+	    !yz_kernel_read_nofault(&head, head_addr, sizeof(head)))
+		return false;
+
+	pos = (unsigned long)head.next;
+	while (yz_valid_kernel_addr(pos) && pos != head_addr &&
+	       count++ < YZ_KP_MAX_VMAP_AREAS) {
+		unsigned long va_addr =
+			pos - offsetof(struct yz_kp_vmap_area, list);
+		struct vm_struct vm;
+		unsigned long size;
+
+		if (!yz_kernel_read_nofault(&va, va_addr, sizeof(va)))
+			break;
+
+		if (yz_valid_kernel_addr(va.va_start) &&
+		    yz_valid_kernel_addr(va.va_end) &&
+		    va.va_end > va.va_start) {
+			size = va.va_end - va.va_start;
+			if (size >= YZ_KP_SYMBOL_SIZE &&
+			    size <= YZ_KP_MAX_VMAP_RANGE &&
+			    yz_valid_kernel_addr((unsigned long)va.vm) &&
+			    yz_kernel_read_nofault(&vm, (unsigned long)va.vm,
+						   sizeof(vm)) &&
+			    (unsigned long)vm.addr == va.va_start &&
+			    vm.size == size && vm.flags == YZ_KP_VM_FLAGS) {
+				pr_info("yukizygisk: scanning APatch-like vmap [%lx, %lx) caller=%px\n",
+					va.va_start, va.va_end, vm.caller);
+				if (yz_kp_scan_range(va.va_start, va.va_end,
+						     tag))
+					return true;
+			}
+		}
+
+		pos = (unsigned long)va.list.next;
+	}
+
+	return false;
+}
+
+static bool yz_kp_scan_vmap_nodes(void)
+{
+	unsigned long nodes_sym = yz_lookup_callable_quiet("vmap_nodes");
+	unsigned long nr_sym = yz_lookup_callable_quiet("nr_vmap_nodes");
+	struct yz_kp_vmap_node *nodes;
+	unsigned int nr;
+	unsigned int i;
+
+	if (!yz_valid_kernel_addr(nodes_sym) ||
+	    !yz_valid_kernel_addr(nr_sym) ||
+	    !yz_kernel_read_nofault(&nodes, nodes_sym, sizeof(nodes)) ||
+	    !yz_kernel_read_nofault(&nr, nr_sym, sizeof(nr)) ||
+	    !yz_valid_kernel_addr((unsigned long)nodes) || nr == 0 || nr > 1024)
+		return false;
+
+	for (i = 0; i < nr; i++) {
+		unsigned long head_addr = (unsigned long)&nodes[i].busy.head;
+
+		if (yz_kp_scan_vmap_list(head_addr, "vmalloc"))
+			return true;
+	}
+
+	return false;
+}
+
+static bool yz_kp_scan_legacy_vmap_list(void)
+{
+	unsigned long head_addr = yz_lookup_callable_quiet("vmap_area_list");
+
+	if (!yz_valid_kernel_addr(head_addr))
+		return false;
+
+	return yz_kp_scan_vmap_list(head_addr, "vmalloc");
+}
+
+static bool yz_kp_scan_symbols(void)
+{
+	if (yz_kp_scan_kernel_image())
+		return true;
+	if (yz_kp_scan_vmap_nodes())
+		return true;
+	if (yz_kp_scan_legacy_vmap_list())
+		return true;
+
+	pr_info("yukizygisk: APatch KP symbol table not found in scanned memory\n");
+	return false;
+}
+
+static bool yz_apatch_detect(void)
+{
+	unsigned long addr;
+
+	yz_ap_clear_symbols();
+
+	addr = yz_lookup_callable_quiet("su_get_path");
+	if (addr && yz_valid_kernel_addr(addr)) {
+		yz_ap_su_get_path = (void *)addr;
+		yz_ap_su_allow_uid_profile =
+			(void *)yz_lookup_callable_quiet("su_allow_uid_profile");
+		yz_ap_get_mod_exclude =
+			(void *)yz_lookup_callable_quiet("get_ap_mod_exclude");
+		pr_info("yukizygisk: APatch sucompat detected via kallsyms\n");
+		return true;
+	}
+
+	if (yz_kp_scan_symbols()) {
+		pr_info("yukizygisk: APatch sucompat detected via KP symbol scan\n");
+		return true;
+	}
+
+	return false;
+}
+
+static bool yz_path_exists(const char *path)
+{
+	struct file *file;
+
+	if (!path)
+		return false;
+	file = yz_open_ro(path);
+	if (IS_ERR(file))
+		return false;
+	yz_close_file(file);
+	return true;
+}
+
+static bool yz_ksu_detect(void)
+{
+	unsigned long addr;
+	bool seen = false;
+	bool has_policy = false;
+
+	addr = yz_lookup_callable_quiet("ksu_syscall_table");
+	if (addr && yz_valid_kernel_addr(addr)) {
+		yz_root_mask |= YZ_ROOT_KSU;
+		seen = true;
+		addr = yz_lookup_callable_quiet("ksu_dispatcher_nr");
+		if (addr && yz_valid_kernel_addr(addr)) {
+			int nr = -1;
+
+			if (yz_kernel_read_nofault(&nr, addr, sizeof(nr)) &&
+			    nr >= 0) {
+				yz_ksu_dispatcher_nr = nr;
+				yz_root_mask |= YZ_ROOT_KSU_RDR;
+			}
+		}
+	}
+
+	addr = yz_lookup_callable_quiet("ksu_uid_should_umount");
+	if (addr && yz_valid_kernel_addr(addr)) {
+		yz_root_mask |= YZ_ROOT_KSU;
+		yz_ksu_uid_should_umount_ptr = (void *)addr;
+		seen = true;
+		has_policy = true;
+	}
+
+	addr = yz_lookup_callable_quiet("ksu_get_allow_list");
+	if (addr && yz_valid_kernel_addr(addr)) {
+		yz_root_mask |= YZ_ROOT_KSU;
+		yz_ksu_get_allow_list_ptr = (void *)addr;
+		seen = true;
+		has_policy = true;
+	}
+
+	if (seen) {
+		addr = yz_lookup_callable_quiet("__ksu_is_allow_uid_for_current");
+		if (addr && yz_valid_kernel_addr(addr))
+			yz_ksu_is_allow_uid_ptr = (void *)addr;
+		if (!yz_ksu_is_allow_uid_ptr) {
+			addr = yz_lookup_callable_quiet("__ksu_is_allow_uid");
+			if (addr && yz_valid_kernel_addr(addr))
+				yz_ksu_is_allow_uid_ptr = (void *)addr;
+		}
+	}
+
+	if (yz_path_exists(YZ_KSU_ALLOWLIST_PATH)) {
+		yz_root_mask |= YZ_ROOT_KSU;
+		seen = true;
+		has_policy = true;
+	}
+
+	if (seen)
+		pr_info("yukizygisk: KernelSU detected%s%s\n",
+			(yz_root_mask & YZ_ROOT_KSU_RDR) ? " (redirect)" : "",
+			has_policy ? "" : " (no policy source)");
+
+	return has_policy;
+}
+
+static bool yz_magisk_detect(void)
+{
+	static const char *const magisk_paths[] = {
+		"/sbin/magisk",
+		"/debug_ramdisk/sbin/magisk",
+		"/data/adb/magisk/magisk",
+		NULL,
+	};
+	int i;
+
+	for (i = 0; magisk_paths[i]; i++) {
+		struct file *file = yz_open_ro(magisk_paths[i]);
+
+		if (IS_ERR(file))
+			continue;
+		yz_close_file(file);
+		yz_root_mask |= YZ_ROOT_MAGISK;
+		pr_info("yukizygisk: Magisk detected at %s\n",
+			magisk_paths[i]);
+		return true;
+	}
+
+	return false;
+}
+
+void yz_host_root_detect(void)
+{
+	bool ksu_active;
+	bool apatch_active;
+	bool magisk_active;
+	int active_roots = 0;
+
+	yz_root_mask = YZ_ROOT_NONE;
+	yz_ksu_dispatcher_nr = -1;
+	yz_root_policy_allowed = false;
+	yz_ksu_is_allow_uid_ptr = NULL;
+	yz_ksu_uid_should_umount_ptr = NULL;
+	yz_ksu_get_allow_list_ptr = NULL;
+
+	ksu_active = yz_ksu_detect();
+	if (!ksu_active && (yz_root_mask & YZ_ROOT_KSU))
+		pr_warn("yukizygisk: KernelSU detected without allowlist policy source\n");
+
+	if (yz_apatch_detect()) {
+		yz_root_mask |= YZ_ROOT_APATCH;
+		apatch_active = true;
+	} else {
+		apatch_active = false;
+	}
+
+	magisk_active = yz_magisk_detect();
+
+	if (ksu_active)
+		active_roots++;
+	if (apatch_active)
+		active_roots++;
+	if (magisk_active)
+		active_roots++;
+
+	if (active_roots > 1) {
+		yz_root_mask |= YZ_ROOT_MULTI;
+		pr_warn("yukizygisk: multi-root detected (mask=0x%x), automatic policy owner disabled\n",
+			yz_root_mask);
+		return;
+	}
+
+	if (ksu_active) {
+		yz_root_policy_allowed = true;
+		pr_info("yukizygisk: root policy owner: KernelSU backend\n");
+		return;
+	}
+
+	if (apatch_active) {
+		yz_root_policy_allowed = true;
+		pr_info("yukizygisk: root policy owner: APatch backend\n");
+		return;
+	}
+
+	if (!magisk_active)
+		yz_root_mask |= YZ_ROOT_NON_ROOT;
+	pr_warn("yukizygisk: no automatic kernel root policy owner (mask=0x%x)\n",
+		yz_root_mask);
+}
+
+bool yz_host_root_allows_policy(void)
+{
+	switch (READ_ONCE(yz_policy_owner_override)) {
+	case YZ_POLICY_OWNER_DISABLED:
+		return false;
+	case YZ_POLICY_OWNER_KERNELSU:
+	case YZ_POLICY_OWNER_APATCH:
+	case YZ_POLICY_OWNER_MANUAL:
+		return true;
+	case YZ_POLICY_OWNER_MAGISK:
+		return false;
+	case YZ_POLICY_OWNER_AUTO:
+	default:
+		break;
+	}
+
+	return READ_ONCE(yz_root_policy_allowed);
+}
