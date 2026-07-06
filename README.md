@@ -32,6 +32,16 @@ validation work. The kernel-side setresuid tracepoint monitor, SELinux policy
 adapter, and mount cleanup adapter are present in the standalone LKM, but still
 need device-side validation before they can be treated as runtime parity.
 
+The standalone control path no longer creates `/dev/yukizygisk`. The LKM arms a
+one-shot `prctl` bootstrap when loaded with a per-boot cookie; `zygiskd` claims
+an anonymous control fd immediately after startup and then reuses the
+`YZ_IOCTL_*` command surface on that fd.
+
+If zygiskd never claims the bootstrap fd, the kernel guard checks for zygote
+service sockets after a short delay. Once service startup is visible, the guard
+clears the bootstrap cookie, removes the temporary `prctl` hook, and requests a
+best-effort self-unload through `toybox rmmod yukizygisk`.
+
 The standalone design target is root-implementation agnostic. KSU/YukiSU,
 KernelPatch, APatch, Magisk, and other high-CAP root environments should be
 host backends, not project owners. Kernel code should call YukiZygisk-owned
@@ -51,3 +61,9 @@ enabled.
 
 The standalone control ABI is `YZ_IOCTL_*` with ioctl magic `'Y'` only. It does
 not accept the integrated YukiSU/YukiZygisk `KSU_IOCTL_YZ_*`/`'K'` ABI.
+
+The default packaging direction is a normal module containing `yukizygisk.ko`,
+`zygiskd`, `libzygisk.so`, `libyukilinker.so`, and `libyukizncore.so`, with
+`post-fs-data.sh` loading the LKM and starting the daemon. This gives up
+early-native injection by default; that capability can remain a future optional
+host backend rather than the baseline standalone path.

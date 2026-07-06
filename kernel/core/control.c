@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0 */
 /*
- * YukiZygisk - Standalone ioctl control device.
+ * YukiZygisk - Anonymous ioctl control file.
  *
  * License: Author's work under Apache-2.0; when used as a kernel module
  * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
@@ -9,9 +9,11 @@
  */
 
 #include <linux/cred.h>
+#include <linux/anon_inodes.h>
 #include <linux/errno.h>
+#include <linux/fdtable.h>
 #include <linux/fs.h>
-#include <linux/miscdevice.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/pid.h>
 #include <linux/printk.h>
@@ -298,32 +300,56 @@ static long yukizygisk_ioctl(struct file *file, unsigned int request,
 	}
 }
 
+static int yukizygisk_release(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	(void)file;
+	module_put(THIS_MODULE);
+	return 0;
+}
+
 static const struct file_operations yukizygisk_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = yukizygisk_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = yukizygisk_ioctl,
 #endif
-};
-
-static struct miscdevice yukizygisk_misc = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "yukizygisk",
-	.fops = &yukizygisk_fops,
-	.mode = 0600,
+	.release = yukizygisk_release,
 };
 
 int yukizygisk_control_init(void)
 {
-	int ret = misc_register(&yukizygisk_misc);
-
-	if (ret)
-		return ret;
-	pr_info("yukizygisk: control device /dev/yukizygisk registered\n");
+	pr_info("yukizygisk: anonymous control fd backend ready\n");
 	return 0;
 }
 
 void yukizygisk_control_exit(void)
 {
-	misc_deregister(&yukizygisk_misc);
+}
+
+int yukizygisk_control_install_fd(void)
+{
+	struct file *file;
+	int fd;
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+	if (!try_module_get(THIS_MODULE)) {
+		put_unused_fd(fd);
+		return -ENODEV;
+	}
+
+	file = anon_inode_getfile("ctl", &yukizygisk_fops, NULL,
+				  O_RDWR | O_CLOEXEC);
+	if (IS_ERR(file)) {
+		module_put(THIS_MODULE);
+		put_unused_fd(fd);
+		return PTR_ERR(file);
+	}
+
+	fd_install(fd, file);
+	pr_info("yukizygisk: anonymous control fd installed pid=%d fd=%d\n",
+		current->pid, fd);
+	return fd;
 }

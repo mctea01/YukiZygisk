@@ -13,6 +13,7 @@
 #include <linux/moduleparam.h>
 #include <linux/printk.h>
 
+#include "core/bootstrap.h"
 #include "core/control.h"
 #include "feature/zygote_ctl.h"
 #include "feature/zygote_nl.h"
@@ -43,9 +44,13 @@ static int __init yukizygisk_init(void)
 
 	ret = yukizygisk_control_init();
 	if (ret) {
-		pr_err("yukizygisk: control device init failed: %d\n", ret);
+		pr_err("yukizygisk: control backend init failed: %d\n", ret);
 		goto err_control;
 	}
+
+	ret = yukizygisk_bootstrap_init();
+	if (ret)
+		goto err_bootstrap;
 
 	if (yz_enable) {
 		ret = yz_host_set_feature(YZ_FEATURE_YUKIZYGISK, 1);
@@ -56,6 +61,8 @@ static int __init yukizygisk_init(void)
 	pr_info("yukizygisk: standalone LKM initialized\n");
 	return 0;
 
+err_bootstrap:
+	yukizygisk_control_exit();
 err_control:
 	yz_zygote_ctl_exit();
 	yz_zygote_orch_exit();
@@ -70,6 +77,7 @@ static void __exit yukizygisk_exit(void)
 {
 	pr_info("yukizygisk: standalone LKM exiting\n");
 
+	yukizygisk_bootstrap_exit();
 	yukizygisk_control_exit();
 	yz_zygote_ctl_exit();
 	yz_zygote_orch_exit();
