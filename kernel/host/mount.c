@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/path.h>
 #include <linux/pid.h>
@@ -59,7 +60,7 @@ static int yz_mount_resolve_path_umount(void)
 	return 0;
 }
 
-static int yz_try_umount(const char *mnt, int flags)
+static YZ_INDIRECT_CALL int yz_try_umount(const char *mnt, int flags)
 {
 	struct path path;
 	int ret;

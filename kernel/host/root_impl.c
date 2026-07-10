@@ -35,7 +35,6 @@
 #define YZ_KP_MAX_VMAP_AREAS 4096
 #define YZ_KP_VM_FLAGS 0x44UL
 #define YZ_KP_SU_NAME "su_get_path"
-#define YZ_KSU_DENYLIST_UID_MAX 4096
 #define YZ_KSU_ALLOWLIST_PATH "/data/adb/ksu/.allowlist"
 
 #define YZ_ROOT_FLAG_KSU_REDIRECT (1U << 0)
@@ -88,9 +87,6 @@ yz_ksu_is_allow_uid_fn yz_ksu_is_allow_uid_ptr;
 yz_ksu_uid_should_umount_fn yz_ksu_uid_should_umount_ptr;
 yz_ksu_get_allow_list_fn yz_ksu_get_allow_list_ptr;
 
-static int *yz_ksu_denylist_uids;
-static u16 yz_ksu_denylist_count;
-
 const char *(*yz_ap_su_get_path)(void);
 int (*yz_ap_is_su_allow_uid)(uid_t uid);
 int (*yz_ap_su_allow_uid_nums)(void);
@@ -104,7 +100,7 @@ int (*yz_ap_read_kstorage)(int gid, long did, void *data, int offset,
 int (*yz_ap_list_kstorage_ids)(int gid, long *ids, int idslen,
 			       bool data_is_user);
 
-static YZ_NOCFI struct file *yz_open_ro(const char *path)
+static YZ_INDIRECT_CALL struct file *yz_open_ro(const char *path)
 {
 	if (!yz_filp_open)
 		yz_filp_open = (void *)yz_lookup_callable_quiet("filp_open");
@@ -113,7 +109,7 @@ static YZ_NOCFI struct file *yz_open_ro(const char *path)
 	return yz_filp_open(path, O_RDONLY, 0);
 }
 
-static YZ_NOCFI void yz_close_file(struct file *file)
+static YZ_INDIRECT_CALL void yz_close_file(struct file *file)
 {
 	if (!yz_filp_close)
 		yz_filp_close = (void *)yz_lookup_callable_quiet("filp_close");
@@ -451,7 +447,6 @@ static bool yz_ksu_detect(bool *policy_available)
 		yz_root_mask |= YZ_ROOT_KSU;
 		yz_ksu_get_allow_list_ptr = (void *)addr;
 		seen = true;
-		has_policy = true;
 	}
 
 	if (seen) {
@@ -504,55 +499,13 @@ static bool yz_magisk_detect(void)
 	return false;
 }
 
-static void yz_ksu_clear_denylist(void)
+static int yz_ksu_prepare_denylist(void)
 {
-	kfree(yz_ksu_denylist_uids);
-	yz_ksu_denylist_uids = NULL;
-	yz_ksu_denylist_count = 0;
-}
-
-static YZ_NOCFI int yz_ksu_prepare_denylist(void)
-{
-	int *uids;
-	u16 out_length = 0;
-	u16 out_total = 0;
-	u16 i;
-	u16 valid = 0;
-	bool ok;
-
 	if (yz_ksu_uid_should_umount_ptr) {
-		pr_info("yukizygisk: KernelSU denylist backend: ksu_uid_should_umount\n");
+		pr_info("yukizygisk: KernelSU denylist backend: kallsyms callable ksu_uid_should_umount\n");
 		return 0;
 	}
-	if (!yz_ksu_get_allow_list_ptr)
-		return -EOPNOTSUPP;
-
-	uids = kcalloc(YZ_KSU_DENYLIST_UID_MAX, sizeof(*uids), GFP_KERNEL);
-	if (!uids)
-		return -ENOMEM;
-
-	ok = yz_ksu_get_allow_list_ptr(uids, YZ_KSU_DENYLIST_UID_MAX,
-					     &out_length, &out_total, false);
-	if (!ok) {
-		kfree(uids);
-		return -EIO;
-	}
-	if (out_total > out_length) {
-		pr_err("yukizygisk: KernelSU denylist has %u entries, bulk API returned %u; refusing a partial policy\n",
-		       out_total, out_length);
-		kfree(uids);
-		return -E2BIG;
-	}
-
-	for (i = 0; i < out_length; i++) {
-		if (uids[i] > 0)
-			uids[valid++] = uids[i];
-	}
-	yz_ksu_denylist_uids = uids;
-	yz_ksu_denylist_count = valid;
-	pr_info("yukizygisk: KernelSU denylist backend: cached %u uid(s)\n",
-		valid);
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 int yz_host_root_detect(void)
@@ -564,7 +517,6 @@ int yz_host_root_detect(void)
 	int active_roots = 0;
 	int ret;
 
-	yz_ksu_clear_denylist();
 	yz_root_mask = YZ_ROOT_NONE;
 	yz_ksu_dispatcher_nr = -1;
 	yz_root_owner = YZ_ROOT_OWNER_NONE;
@@ -645,10 +597,8 @@ bool yz_host_root_allows_policy(void)
 	return READ_ONCE(yz_root_policy_allowed);
 }
 
-YZ_NOCFI bool yz_host_uid_should_umount(uid_t uid)
+YZ_INDIRECT_CALL bool yz_host_uid_should_umount(uid_t uid)
 {
-	u16 i;
-
 	if (uid == 0 || !READ_ONCE(yz_root_policy_allowed))
 		return false;
 
@@ -656,10 +606,6 @@ YZ_NOCFI bool yz_host_uid_should_umount(uid_t uid)
 	case YZ_ROOT_OWNER_KERNELSU:
 		if (yz_ksu_uid_should_umount_ptr)
 			return yz_ksu_uid_should_umount_ptr(uid);
-		for (i = 0; i < READ_ONCE(yz_ksu_denylist_count); i++) {
-			if (yz_ksu_denylist_uids[i] == (int)uid)
-				return true;
-		}
 		return false;
 	case YZ_ROOT_OWNER_KERNELPATCH:
 		return yz_ap_get_mod_exclude && yz_ap_get_mod_exclude(uid) != 0;
@@ -693,7 +639,6 @@ void yz_host_root_exit(void)
 {
 	yz_root_policy_allowed = false;
 	yz_root_owner = YZ_ROOT_OWNER_NONE;
-	yz_ksu_clear_denylist();
 	yz_ksu_is_allow_uid_ptr = NULL;
 	yz_ksu_uid_should_umount_ptr = NULL;
 	yz_ksu_get_allow_list_ptr = NULL;

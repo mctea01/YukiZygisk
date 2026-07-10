@@ -15,7 +15,6 @@
 #include <linux/printk.h>
 #include <linux/task_work.h>
 #include <linux/string.h>
-#include <linux/version.h>
 
 #include "host/root_impl.h"
 #include "host/runtime.h"
@@ -50,12 +49,6 @@ static bool (*yz_kallsyms_lookup_size_offset_fn)(unsigned long addr,
 						 unsigned long *symbolsize,
 						 unsigned long *offset);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-#define YZ_USE_KCFI 1
-#else
-#define YZ_USE_KCFI 0
-#endif
-
 bool yz_valid_kernel_addr(unsigned long addr)
 {
 	if (!addr)
@@ -69,7 +62,7 @@ bool yz_valid_kernel_addr(unsigned long addr)
 #endif
 }
 
-YZ_NOCFI unsigned long yz_lookup_name(const char *name)
+YZ_INDIRECT_CALL unsigned long yz_lookup_name(const char *name)
 {
 	if (yz_kallsyms_lookup_name) {
 		unsigned long addr = yz_kallsyms_lookup_name(name);
@@ -100,7 +93,7 @@ YZ_NOCFI unsigned long yz_lookup_name(const char *name)
 	}
 }
 
-YZ_NOCFI unsigned long yz_lookup_name_quiet(const char *name)
+YZ_INDIRECT_CALL unsigned long yz_lookup_name_quiet(const char *name)
 {
 	if (yz_kallsyms_lookup_name) {
 		unsigned long addr = yz_kallsyms_lookup_name(name);
@@ -125,56 +118,42 @@ YZ_NOCFI unsigned long yz_lookup_name_quiet(const char *name)
 	}
 }
 
-YZ_NOCFI unsigned long yz_lookup_callable(const char *name)
+YZ_INDIRECT_CALL unsigned long yz_lookup_callable(const char *name)
 {
-	unsigned long addr;
-
-#if YZ_USE_KCFI
-	addr = yz_lookup_name(name);
-	if (addr)
-		return addr;
-#endif
+	/*
+	 * Old jump-table CFI kernels only accept the generated .cfi_jt thunk
+	 * as an indirect-call target. KCFI kernels accept the raw entry, and
+	 * symbols without a thunk also need that raw fallback. This order is
+	 * intentionally identical to Kasumi's callable resolver.
+	 */
 	if (yz_kallsyms_lookup_name) {
 		char jt[256];
+		unsigned long addr;
 
 		if (snprintf(jt, sizeof(jt), "%s.cfi_jt", name) <
 		    (int)sizeof(jt)) {
 			addr = yz_kallsyms_lookup_name(jt);
 			if (addr && !IS_ERR_VALUE(addr))
 				return addr;
-			}
+		}
 	}
-#if YZ_USE_KCFI
-	return 0;
-#else
 	return yz_lookup_name(name);
-#endif
 }
 
-YZ_NOCFI unsigned long yz_lookup_callable_quiet(const char *name)
+YZ_INDIRECT_CALL unsigned long yz_lookup_callable_quiet(const char *name)
 {
-	unsigned long addr;
-
-#if YZ_USE_KCFI
-	addr = yz_lookup_name_quiet(name);
-	if (addr)
-		return addr;
-#endif
 	if (yz_kallsyms_lookup_name) {
 		char jt[256];
+		unsigned long addr;
 
 		if (snprintf(jt, sizeof(jt), "%s.cfi_jt", name) <
 		    (int)sizeof(jt)) {
 			addr = yz_kallsyms_lookup_name(jt);
 			if (addr && !IS_ERR_VALUE(addr))
 				return addr;
-			}
+		}
 	}
-#if YZ_USE_KCFI
-	return 0;
-#else
 	return yz_lookup_name_quiet(name);
-#endif
 }
 
 static void yz_resolve_kallsyms_lookup(void)
@@ -201,7 +180,8 @@ static void yz_resolve_kallsyms_lookup(void)
 		(unsigned long)yz_kallsyms_lookup_name);
 }
 
-bool yz_kernel_read_nofault(void *dst, unsigned long src, size_t size)
+YZ_INDIRECT_CALL bool yz_kernel_read_nofault(void *dst, unsigned long src,
+				     size_t size)
 {
 	if (!yz_copy_from_kernel_nofault_tried) {
 		unsigned long addr =
@@ -216,8 +196,9 @@ bool yz_kernel_read_nofault(void *dst, unsigned long src, size_t size)
 	       yz_copy_from_kernel_nofault_fn(dst, (const void *)src, size) == 0;
 }
 
-bool yz_lookup_size_offset(unsigned long addr, unsigned long *symbolsize,
-			   unsigned long *offset)
+YZ_INDIRECT_CALL bool yz_lookup_size_offset(unsigned long addr,
+				    unsigned long *symbolsize,
+				    unsigned long *offset)
 {
 	if (!yz_kallsyms_lookup_size_offset_fn) {
 		unsigned long sym =
@@ -231,36 +212,36 @@ bool yz_lookup_size_offset(unsigned long addr, unsigned long *symbolsize,
 	       yz_kallsyms_lookup_size_offset_fn(addr, symbolsize, offset);
 }
 
-YZ_NOCFI struct cred *yz_prepare_creds(void)
+YZ_INDIRECT_CALL struct cred *yz_prepare_creds(void)
 {
 	return yz_prepare_creds_fn ? yz_prepare_creds_fn() : NULL;
 }
 
-YZ_NOCFI void yz_abort_creds(struct cred *cred)
+YZ_INDIRECT_CALL void yz_abort_creds(struct cred *cred)
 {
 	if (yz_abort_creds_fn)
 		yz_abort_creds_fn(cred);
 }
 
-YZ_NOCFI const struct cred *yz_override_creds(const struct cred *cred)
+YZ_INDIRECT_CALL const struct cred *yz_override_creds(const struct cred *cred)
 {
 	return yz_override_creds_fn ? yz_override_creds_fn(cred) : NULL;
 }
 
-YZ_NOCFI void yz_revert_creds(const struct cred *cred)
+YZ_INDIRECT_CALL void yz_revert_creds(const struct cred *cred)
 {
 	if (yz_revert_creds_fn)
 		yz_revert_creds_fn(cred);
 }
 
-YZ_NOCFI struct file *yz_file_open(const char *filename, int flags,
-				   umode_t mode)
+YZ_INDIRECT_CALL struct file *yz_file_open(const char *filename, int flags,
+					   umode_t mode)
 {
 	return yz_filp_open ? yz_filp_open(filename, flags, mode) :
 			      ERR_PTR(-ENOENT);
 }
 
-YZ_NOCFI int yz_file_close(struct file *file, fl_owner_t id)
+YZ_INDIRECT_CALL int yz_file_close(struct file *file, fl_owner_t id)
 {
 	if (yz_filp_close)
 		return yz_filp_close(file, id);
@@ -268,34 +249,34 @@ YZ_NOCFI int yz_file_close(struct file *file, fl_owner_t id)
 	return 0;
 }
 
-YZ_NOCFI ssize_t yz_kernel_read(struct file *file, void *buf, size_t count,
-				loff_t *pos)
+YZ_INDIRECT_CALL ssize_t yz_kernel_read(struct file *file, void *buf,
+					size_t count, loff_t *pos)
 {
 	return yz_kernel_read_fn ? yz_kernel_read_fn(file, buf, count, pos) :
 				   -ENOENT;
 }
 
-YZ_NOCFI ssize_t yz_kernel_write(struct file *file, const void *buf,
-				 size_t count, loff_t *pos)
+YZ_INDIRECT_CALL ssize_t yz_kernel_write(struct file *file, const void *buf,
+					 size_t count, loff_t *pos)
 {
 	return yz_kernel_write_fn ? yz_kernel_write_fn(file, buf, count, pos) :
 				    -ENOENT;
 }
 
-YZ_NOCFI int yz_kern_path(const char *name, unsigned int flags,
-			  struct path *path)
+YZ_INDIRECT_CALL int yz_kern_path(const char *name, unsigned int flags,
+				  struct path *path)
 {
 	return yz_kern_path_fn ? yz_kern_path_fn(name, flags, path) : -ENOENT;
 }
 
-YZ_NOCFI int yz_close_fd(unsigned int fd)
+YZ_INDIRECT_CALL int yz_close_fd(unsigned int fd)
 {
 	return yz_close_fd_fn ? yz_close_fd_fn(fd) : -ENOENT;
 }
 
-YZ_NOCFI int yz_task_work_add(struct task_struct *task,
-			      struct callback_head *twork,
-			      enum task_work_notify_mode mode)
+YZ_INDIRECT_CALL int yz_task_work_add(struct task_struct *task,
+				      struct callback_head *twork,
+				      enum task_work_notify_mode mode)
 {
 	if (!yz_task_work_add_fn)
 		return -ENOENT;

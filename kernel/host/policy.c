@@ -110,7 +110,8 @@ yz_policy_inode_security(const struct inode *inode)
 	return inode->i_security + yz_selinux_blob_sizes->lbs_inode;
 }
 
-static struct context *yz_policy_sidtab_search(struct sidtab *sidtab, u32 sid)
+static YZ_INDIRECT_CALL struct context *
+yz_policy_sidtab_search(struct sidtab *sidtab, u32 sid)
 {
 	struct sidtab_entry *entry;
 
@@ -148,7 +149,8 @@ static const char *yz_policy_class_name_by_value(struct policydb *db,
 	return db->sym_val_to_name[SYM_CLASSES][tclass - 1];
 }
 
-static u32 yz_policy_type_value_by_name(struct policydb *db, const char *name)
+static YZ_INDIRECT_CALL u32
+yz_policy_type_value_by_name(struct policydb *db, const char *name)
 {
 	struct type_datum *type;
 
@@ -171,7 +173,8 @@ static void yz_policy_copy_type_name(char *dst, size_t dst_size,
 		strscpy(dst, "-", dst_size);
 }
 
-static u32 yz_policy_perm_mask(struct class_datum *cls, const char *perm_name)
+static YZ_INDIRECT_CALL u32
+yz_policy_perm_mask(struct class_datum *cls, const char *perm_name)
 {
 	struct perm_datum *perm;
 
@@ -200,8 +203,9 @@ static u32 yz_policy_required_av(struct class_datum *cls,
 	return av;
 }
 
-static u32 yz_policy_direct_allowed_av_locked(struct policydb *db,
-					      const struct yz_policy_key *key)
+static YZ_INDIRECT_CALL u32
+yz_policy_direct_allowed_av_locked(struct policydb *db,
+				   const struct yz_policy_key *key)
 {
 	struct avtab_key avkey = {};
 	struct avtab_node *node;
@@ -231,8 +235,9 @@ u32 yz_policy_base_direct_allowed_av(const struct yz_policy_key *key)
 	return yz_policy_direct_allowed_av_locked(&policy->policydb, key);
 }
 
-static struct avtab_node *yz_policy_get_avtab_node(struct policydb *db,
-						   const struct yz_policy_key *key)
+static YZ_INDIRECT_CALL struct avtab_node *
+yz_policy_get_avtab_node(struct policydb *db,
+			 const struct yz_policy_key *key)
 {
 	struct avtab_key avkey = {};
 	struct avtab_datum datum = {};
@@ -255,8 +260,8 @@ static struct avtab_node *yz_policy_get_avtab_node(struct policydb *db,
 	return node;
 }
 
-static bool yz_policy_remove_avtab_node(struct policydb *db,
-					struct avtab_node *node)
+static YZ_INDIRECT_CALL bool
+yz_policy_remove_avtab_node(struct policydb *db, struct avtab_node *node)
 {
 	struct avtab removed = {};
 	struct avtab_node *cur;
@@ -294,9 +299,9 @@ static bool yz_policy_remove_avtab_node(struct policydb *db,
 	return false;
 }
 
-static int yz_policy_apply_av(struct policydb *db,
-			      const struct yz_policy_key *key, u32 av,
-			      bool allow)
+static YZ_INDIRECT_CALL int
+yz_policy_apply_av(struct policydb *db, const struct yz_policy_key *key,
+		   u32 av, bool allow)
 {
 	struct avtab_node *node;
 
@@ -333,7 +338,8 @@ static int yz_policy_apply_av(struct policydb *db,
 	return 0;
 }
 
-static int yz_policy_begin_edit_locked(struct yz_policy_edit *edit)
+static YZ_INDIRECT_CALL int
+yz_policy_begin_edit_locked(struct yz_policy_edit *edit)
 {
 	struct selinux_policy *old_pol;
 	struct policy_file fp;
@@ -375,7 +381,8 @@ out_free:
 	return ret;
 }
 
-static void yz_policy_cancel_edit_locked(struct yz_policy_edit *edit)
+static YZ_INDIRECT_CALL void
+yz_policy_cancel_edit_locked(struct yz_policy_edit *edit)
 {
 	if (edit->load_state.policy)
 		yz_selinux_policy_cancel(&edit->load_state);
@@ -383,7 +390,8 @@ static void yz_policy_cancel_edit_locked(struct yz_policy_edit *edit)
 	memset(edit, 0, sizeof(*edit));
 }
 
-static void yz_policy_commit_edit_locked(struct yz_policy_edit *edit)
+static YZ_INDIRECT_CALL void
+yz_policy_commit_edit_locked(struct yz_policy_edit *edit)
 {
 	yz_selinux_policy_commit(&edit->load_state);
 	vfree(edit->data);
@@ -496,13 +504,14 @@ void yz_policy_base_unlock(void)
 	mutex_unlock(&yz_policy_lock);
 }
 
-int yz_policy_base_get_file_load_keys(struct file *file,
-				      struct yz_policy_key *file_key,
-				      u32 *file_required_av,
-				      struct yz_policy_key *tmpfs_key,
-				      u32 *tmpfs_required_av,
-				      char *src_name, size_t src_name_size,
-				      char *tgt_name, size_t tgt_name_size)
+YZ_INDIRECT_CALL int
+yz_policy_base_get_file_load_keys(struct file *file,
+				  struct yz_policy_key *file_key,
+				  u32 *file_required_av,
+				  struct yz_policy_key *tmpfs_key,
+				  u32 *tmpfs_required_av,
+				  char *src_name, size_t src_name_size,
+				  char *tgt_name, size_t tgt_name_size)
 {
 	struct inode_security_struct *isec;
 	struct selinux_policy *policy;
@@ -571,9 +580,9 @@ int yz_policy_base_get_file_load_keys(struct file *file,
 	return 0;
 }
 
-int yz_policy_base_get_execmem_key(struct yz_policy_key *key,
-				   u32 *required_av, char *src_name,
-				   size_t src_name_size)
+YZ_INDIRECT_CALL int
+yz_policy_base_get_execmem_key(struct yz_policy_key *key, u32 *required_av,
+			       char *src_name, size_t src_name_size)
 {
 	struct selinux_policy *policy;
 	struct policydb *db;

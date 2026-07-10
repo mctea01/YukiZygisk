@@ -45,19 +45,22 @@ static int yz_patch_resolve_symbols(void)
 	if (!yz_init_mm)
 		yz_init_mm = (void *)yz_lookup_name("init_mm");
 	if (!yz_set_fixmap)
-		yz_set_fixmap = (void *)yz_lookup_name("__set_fixmap");
+		yz_set_fixmap =
+			(void *)yz_lookup_callable("__set_fixmap");
 	if (!yz_dcache_clean_inval_poc)
 		yz_dcache_clean_inval_poc =
-			(void *)yz_lookup_name_quiet("dcache_clean_inval_poc");
+			(void *)yz_lookup_callable_quiet(
+				"dcache_clean_inval_poc");
 	if (!yz_flush_dcache_area)
 		yz_flush_dcache_area =
-			(void *)yz_lookup_name_quiet("__flush_dcache_area");
+			(void *)yz_lookup_callable_quiet("__flush_dcache_area");
 	if (!yz_caches_clean_inval_pou)
 		yz_caches_clean_inval_pou =
-			(void *)yz_lookup_name_quiet("caches_clean_inval_pou");
+			(void *)yz_lookup_callable_quiet(
+				"caches_clean_inval_pou");
 	if (!yz_flush_icache_range)
 		yz_flush_icache_range =
-			(void *)yz_lookup_name_quiet("__flush_icache_range");
+			(void *)yz_lookup_callable_quiet("__flush_icache_range");
 
 	if (!yz_init_mm || !yz_set_fixmap) {
 		pr_err("yukizygisk: patch_text missing init_mm=%px __set_fixmap=%px\n",
@@ -67,7 +70,8 @@ static int yz_patch_resolve_symbols(void)
 	return 0;
 }
 
-static YZ_NOCFI void yz_patch_flush_dcache(unsigned long start, size_t size)
+static YZ_INDIRECT_CALL void yz_patch_flush_dcache(unsigned long start,
+					    size_t size)
 {
 	if (yz_dcache_clean_inval_poc) {
 		yz_dcache_clean_inval_poc(start, start + size);
@@ -81,7 +85,8 @@ static YZ_NOCFI void yz_patch_flush_dcache(unsigned long start, size_t size)
 		yz_caches_clean_inval_pou(start, start + size);
 }
 
-static YZ_NOCFI void yz_patch_flush_icache(unsigned long start, size_t size)
+static YZ_INDIRECT_CALL void yz_patch_flush_icache(unsigned long start,
+					    size_t size)
 {
 	if (yz_flush_icache_range) {
 		yz_flush_icache_range(start, start + size);
@@ -151,8 +156,8 @@ struct yz_patch_text_info {
 	int flags;
 };
 
-static YZ_NOCFI int yz_patch_text_nosync(void *dst, void *src, size_t len,
-					 int flags)
+static YZ_INDIRECT_CALL int yz_patch_text_nosync(void *dst, void *src,
+						 size_t len, int flags)
 {
 	unsigned long target = (unsigned long)dst;
 	unsigned long phys;

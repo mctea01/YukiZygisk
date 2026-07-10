@@ -28,6 +28,11 @@ struct path;
 #define YZ_NOCFI
 #endif
 
+/* Keep every outbound call through a kallsyms-resolved pointer in a distinct,
+ * non-inlined function. This makes the CFI/KCFI exclusion auditable and stops
+ * an optimizer from moving the indirect call back into instrumented code. */
+#define YZ_INDIRECT_CALL __attribute__((__noinline__)) YZ_NOCFI
+
 extern unsigned long (*yz_kallsyms_lookup_name)(const char *name);
 extern struct file *(*yz_filp_open)(const char *filename, int flags,
 				    umode_t mode);
