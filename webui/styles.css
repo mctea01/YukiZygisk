@@ -512,7 +512,8 @@ a {
 .data-row,
 .module-card,
 .package-row,
-.switch-card {
+.switch-card,
+.select-card {
   min-width: 0;
   border: 1px solid var(--line-soft);
   border-radius: 16px;
@@ -772,7 +773,8 @@ code,
   margin-top: 16px;
 }
 
-.switch-card {
+.switch-card,
+.select-card {
   position: relative;
   min-height: 78px;
   display: flex;
@@ -782,14 +784,16 @@ code,
   padding: 13px;
 }
 
-.switch-card > span:first-child {
+.switch-card > span:first-child,
+.select-card > span:first-child {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.switch-card small {
+.switch-card small,
+.select-card small {
   color: var(--text-muted);
   font-size: 0.74rem;
   line-height: 1.4;
@@ -798,6 +802,16 @@ code,
 .switch-card > input {
   position: absolute;
   opacity: 0;
+}
+
+.select-card select {
+  width: min(44%, 240px);
+  min-height: 44px;
+  flex: 0 0 auto;
+  padding: 0 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  background: var(--surface);
 }
 
 .switch {
@@ -969,7 +983,7 @@ code,
   z-index: 40;
   height: 67px;
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   padding: 5px;
   border: 1px solid var(--line-soft);
   border-radius: 22px;
@@ -1164,6 +1178,15 @@ code,
   .about-hero img {
     width: 62px;
     height: 62px;
+  }
+
+  .select-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .select-card select {
+    width: 100%;
   }
 }
 

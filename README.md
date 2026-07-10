@@ -42,12 +42,13 @@ service sockets after a short delay. Once service startup is visible, the guard
 clears the bootstrap cookie, removes the temporary `prctl` hook, and requests a
 best-effort self-unload through `toybox rmmod yukizygisk`.
 
-The standalone design target is root-implementation agnostic. KSU/YukiSU,
-KernelPatch, APatch, Magisk, and other high-CAP root environments should be
-host backends, not project owners. Kernel code should call YukiZygisk-owned
-`yz_*` and `yz_host_*` interfaces. Host initialization now reuses the
-Kasumi runtime resolver and root implementation detector under YukiZygisk
-naming.
+The standalone design remains root-implementation agnostic at its internal
+boundaries, but its current admission policy is deliberately narrow. Module
+initialization accepts exactly one KernelSU/YukiSU backend (redirect or
+non-redirect) or one KernelPatch/APatch backend with a readable denylist.
+Magisk-only, multi-root, and no-root environments fail closed. Kernel code
+outside the host adapter calls YukiZygisk-owned `yz_*` and `yz_host_*`
+interfaces; detection and denylist routing reuse the Kasumi implementation.
 
 The LSM interception point is now extracted into the standalone host layer:
 `selinux_bprm_committed_creds` is patched through a versioned adapter that uses
@@ -67,3 +68,9 @@ The default packaging direction is a normal module containing `yukizygisk.ko`,
 `post-fs-data.sh` loading the LKM and starting the daemon. This gives up
 early-native injection by default; that capability can remain a future optional
 host backend rather than the baseline standalone path.
+
+The packaged WebUI has three pages: device/injection status, configuration,
+and about/credits. It does not keep a second denylist. When denylist handling is
+enabled, zygiskd asks the accepted KernelSU or KernelPatch backend about each
+full UID and the WebUI only selects whether matching processes skip injection
+or keep injection before mount cleanup.
