@@ -1,0 +1,12 @@
+<!-- SPDX-License-Identifier: MIT; Copyright (c) 2025 KOWX712 and Anatdx. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="YukiZygisk">
+  <defs>
+    <linearGradient id="y" x1="18" y1="14" x2="108" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#83ded3"/>
+      <stop offset="1" stop-color="#176e68"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="34" fill="#11231f"/>
+  <path d="M31 28h18l15 27 15-27h18L72 70v30H56V70L31 28Z" fill="url(#y)"/>
+  <path d="M83 81h18v8H83zm-8 12h26v8H75z" fill="#eaf8f5" opacity=".9"/>
+</svg>

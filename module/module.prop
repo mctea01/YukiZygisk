@@ -3,4 +3,4 @@ name=YukiZygisk
 version=v0.1.0
 versionCode=1
 author=Anatdx
-description=Standalone kernel-level Zygisk implementation
+description=Standalone kernel-level Zygisk with WebUI control and telemetry

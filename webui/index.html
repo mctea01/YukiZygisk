@@ -1,0 +1,32 @@
+<!--
+  SPDX-License-Identifier: MIT
+  YukiZygisk WebUI shell, adapted from Kagami and KOWX712/ksu-webui-demo.
+  Copyright (c) 2025 KOWX712 and Anatdx.
+-->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    >
+    <meta name="color-scheme" content="light dark">
+    <link rel="icon" type="image/svg+xml" href="./icon.svg">
+    <title>YukiZygisk</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script type="module" src="./index.js"></script>
+  </head>
+  <body>
+    <div id="app" class="boot-shell">
+      <div class="boot-panel">
+        <img src="./icon.svg" alt="" width="52" height="52">
+        <div>
+          <div class="boot-mark">YUKIZYGISK</div>
+          <p>Preparing the control surface…</p>
+        </div>
+      </div>
+    </div>
+    <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

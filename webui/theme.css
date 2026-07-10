@@ -1,0 +1,87 @@
+/* SPDX-License-Identifier: MIT */
+/*
+ * YukiZygisk - WebUI X theme tokens.
+ * Derived from KOWX712/ksu-webui-demo and Kagami's static WebUI.
+ * License: MIT
+ * Authors: KOWX712 and Anatdx
+ */
+@import url("https://mui.kernelsu.org/internal/insets.css");
+@import url("https://mui.kernelsu.org/internal/colors.css");
+
+:root {
+  color-scheme: light dark;
+  --inset-top: var(--window-inset-top, 0px);
+  --inset-bottom: var(--window-inset-bottom, 0px);
+  --primary-live: var(--primary, #176e68);
+  --primary-on: var(--onPrimary, #ffffff);
+  --primary-soft: color-mix(in srgb, var(--primary-live) 13%, transparent);
+  --secondary-live: var(--secondary, #9a5a27);
+  --bg: #f4f1eb;
+  --bg-elevated: rgba(255, 255, 255, 0.76);
+  --surface: rgba(255, 255, 255, 0.91);
+  --surface-muted: rgba(247, 243, 236, 0.94);
+  --surface-strong: #ffffff;
+  --text: #17221f;
+  --text-muted: #5b6a66;
+  --text-soft: #7f8d88;
+  --line-soft: rgba(46, 74, 67, 0.12);
+  --line-strong: rgba(46, 74, 67, 0.22);
+  --success: #23745a;
+  --warning: #a6630c;
+  --warning-soft: rgba(166, 99, 12, 0.12);
+  --danger: #b33c35;
+  --danger-soft: rgba(179, 60, 53, 0.12);
+  --shadow: 0 18px 45px rgba(19, 43, 38, 0.1);
+  --grid-line: rgba(18, 31, 28, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1412;
+    --bg-elevated: rgba(18, 24, 22, 0.78);
+    --surface: rgba(23, 30, 27, 0.91);
+    --surface-muted: rgba(17, 24, 22, 0.94);
+    --surface-strong: #18211d;
+    --text: #edf2ef;
+    --text-muted: #a2b2ad;
+    --text-soft: #7f908a;
+    --line-soft: rgba(158, 185, 178, 0.12);
+    --line-strong: rgba(158, 185, 178, 0.2);
+    --primary-live: var(--primary, #7ed3ca);
+    --primary-on: var(--onPrimary, #073733);
+    --success: #68c49e;
+    --warning: #f7bb5e;
+    --warning-soft: rgba(247, 187, 94, 0.12);
+    --danger: #ff8a80;
+    --danger-soft: rgba(255, 138, 128, 0.12);
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.26);
+    --grid-line: rgba(255, 255, 255, 0.035);
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1412;
+  --bg-elevated: rgba(18, 24, 22, 0.78);
+  --surface: rgba(23, 30, 27, 0.91);
+  --surface-muted: rgba(17, 24, 22, 0.94);
+  --surface-strong: #18211d;
+  --text: #edf2ef;
+  --text-muted: #a2b2ad;
+  --text-soft: #7f908a;
+  --line-soft: rgba(158, 185, 178, 0.12);
+  --line-strong: rgba(158, 185, 178, 0.2);
+  --primary-live: var(--primary, #7ed3ca);
+  --primary-on: var(--onPrimary, #073733);
+  --success: #68c49e;
+  --warning: #f7bb5e;
+  --warning-soft: rgba(247, 187, 94, 0.12);
+  --danger: #ff8a80;
+  --danger-soft: rgba(255, 138, 128, 0.12);
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.26);
+  --grid-line: rgba(255, 255, 255, 0.035);
+}

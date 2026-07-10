@@ -24,7 +24,7 @@ done
 chmod 0644 "$MODPATH/yukizygisk.ko"
 chmod 0644 "$MODPATH"/lib*.so
 chmod 0755 "$MODPATH/zygiskd" "$MODPATH/post-fs-data.sh" \
-	"$MODPATH/boot-completed.sh"
+	"$MODPATH/boot-completed.sh" "$MODPATH/action.sh"
 
 BASE_DIR="/data/adb/yukizygisk"
 mkdir -p "$BASE_DIR/lib"

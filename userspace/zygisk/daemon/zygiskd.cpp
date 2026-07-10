@@ -34,6 +34,7 @@
 #include <elf.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstddef>
@@ -208,7 +209,7 @@ bool parse_options(int argc, char **argv) {
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       DLOGI("usage: zygiskd [--bootstrap-cookie-lo N] "
             "[--bootstrap-cookie-hi N] [--modules-dir DIR] [--config FILE] "
-            "[--manager-uid UID]; zygiskd --check-status|--status");
+            "[--manager-uid UID]; zygiskd --check-status|--status|--reload");
       return false;
     } else {
       DLOGE("unknown option: %s", argv[i]);
@@ -480,6 +481,19 @@ bool request_status_json(std::string *out) {
   return ok;
 }
 
+bool request_reload() {
+  int sock = connect_daemon_socket();
+  if (sock < 0)
+    return false;
+
+  uint8_t op = static_cast<uint8_t>(zygiskd::Request::Reload);
+  uint8_t ok = 0;
+  bool ret = write_exact(sock, &op, sizeof(op)) &&
+             read_exact(sock, &ok, sizeof(ok)) && ok != 0;
+  close(sock);
+  return ret;
+}
+
 int run_status_client(bool print_json) {
   signal(SIGPIPE, SIG_IGN);
 
@@ -498,6 +512,15 @@ int run_status_client(bool print_json) {
 
   if (!request_check_status()) {
     fprintf(stderr, "zygiskd: status check failed\n");
+    return 1;
+  }
+  return 0;
+}
+
+int run_reload_client() {
+  signal(SIGPIPE, SIG_IGN);
+  if (!request_reload()) {
+    fprintf(stderr, "zygiskd: reload failed\n");
     return 1;
   }
   return 0;
@@ -910,17 +933,21 @@ static bool yz_revert_app_mounts(pid_t app_pid) {
 }
 
 yz_config g_yz_config{1, 0, 0, 0};
+std::vector<uint32_t> g_denylist_appids;
 
 uint32_t query_flags(uint32_t uid) {
-  (void)uid;
   uint32_t flags = 0;
-  if (g_yz_config.denylist_mode != 0)
+  uint32_t appid = uid % 100000u;
+  if (g_yz_config.denylist_mode != 0 &&
+      std::find(g_denylist_appids.begin(), g_denylist_appids.end(), appid) !=
+          g_denylist_appids.end())
     flags |= 1u << 1;
   return flags;
 }
 
 void read_yzconfig() {
   yz_config cfg{1, 0, 0, 0};
+  std::vector<uint32_t> denylist_appids;
   int fd = open(yzhost::config_path().c_str(), O_RDONLY | O_CLOEXEC);
   if (fd >= 0) {
     std::string buf;
@@ -932,19 +959,40 @@ void read_yzconfig() {
     if (root.type == json::Type::Object) {
       if (root.contains("yukilinker"))
         cfg.yukilinker = root.at("yukilinker").as_bool() ? 1 : 0;
-      if (root.contains("denylist_mode"))
-        cfg.denylist_mode =
-            static_cast<__u8>(root.at("denylist_mode").as_number());
+      if (root.contains("denylist_mode")) {
+        double mode = root.at("denylist_mode").as_number();
+        if (mode == 0 || mode == 1 || mode == 2)
+          cfg.denylist_mode = static_cast<__u8>(mode);
+      }
       if (root.contains("dmesg_log"))
         cfg.dmesg_log = root.at("dmesg_log").as_bool() ? 1 : 0;
+      if (root.contains("denylist_app_ids") &&
+          root.at("denylist_app_ids").type == json::Type::Array) {
+        for (const auto &entry : root.at("denylist_app_ids").as_array()) {
+          if (entry.type != json::Type::Number)
+            continue;
+          double value = entry.as_number();
+          if (value < 0 || value >= 100000)
+            continue;
+          uint32_t appid = static_cast<uint32_t>(value);
+          if (value != static_cast<double>(appid))
+            continue;
+          if (std::find(denylist_appids.begin(), denylist_appids.end(),
+                        appid) == denylist_appids.end())
+            denylist_appids.push_back(appid);
+        }
+        std::sort(denylist_appids.begin(), denylist_appids.end());
+      }
     }
   }
   g_yz_config = cfg;
+  g_denylist_appids = std::move(denylist_appids);
   yz_yukilinker_cmd yc{};
   yc.enabled = cfg.yukilinker;
   yzhost::ctl(YZ_IOCTL_SET_YUKILINKER, &yc);
-  DLOGI("yzconfig: yukilinker=%u denylist_mode=%u dmesg_log=%u", cfg.yukilinker,
-        cfg.denylist_mode, cfg.dmesg_log);
+  DLOGI("yzconfig: yukilinker=%u denylist_mode=%u dmesg_log=%u denylist=%zu",
+        cfg.yukilinker, cfg.denylist_mode, cfg.dmesg_log,
+        g_denylist_appids.size());
 }
 
 void refresh_safemode_status() {
@@ -1334,6 +1382,11 @@ std::string build_status_json() {
 
   std::string s = "{\"kernel_alive\":";
   s += kernel_alive ? "true" : "false";
+  s += ",\"daemon_pid\":";
+  s += std::to_string(getpid());
+  s += ",\"abi\":\"";
+  json_append_escaped(s, kAbi);
+  s += "\"";
   s += ",\"count\":";
   s += std::to_string(g_inject_count);
   s += ",\"safe_mode\":";
@@ -1350,8 +1403,17 @@ std::string build_status_json() {
   s += std::to_string(g_yz_config.denylist_mode);
   s += ",\"dmesg_log\":";
   s += g_yz_config.dmesg_log ? "true" : "false";
-  s += ",\"recent\":[";
+  s += ",\"denylist_app_ids\":[";
   bool first = true;
+  for (uint32_t appid : g_denylist_appids) {
+    if (!first)
+      s += ',';
+    first = false;
+    s += std::to_string(appid);
+  }
+  s += "]";
+  s += ",\"recent\":[";
+  first = true;
   for (uint32_t a : g_recent_appids) {
     if (!first)
       s += ',';
@@ -1545,6 +1607,20 @@ void handle_client(int client) {
     else
       DLOGI("CheckStatus denied: peer uid=%d manager uid=%d",
             static_cast<int>(cr.uid), yzhost::manager_uid());
+    write_exact(client, &ok, sizeof(ok));
+    break;
+  }
+  case zygiskd::Request::Reload: {
+    struct ucred cr{};
+    uint8_t ok = 0;
+    if (peer_can_query_status(client, &cr)) {
+      read_yzconfig();
+      rescan_modules();
+      ok = 1;
+    } else {
+      DLOGI("Reload denied: peer uid=%d manager uid=%d",
+            static_cast<int>(cr.uid), yzhost::manager_uid());
+    }
     write_exact(client, &ok, sizeof(ok));
     break;
   }
@@ -1944,6 +2020,8 @@ extern "C" int zygiskd_main(int argc, char **argv) {
     return run_status_client(false);
   if (argc >= 2 && strcmp(argv[1], "--status") == 0)
     return run_status_client(true);
+  if (argc >= 2 && strcmp(argv[1], "--reload") == 0)
+    return run_reload_client();
   return run_daemon(argc, argv);
 }
 

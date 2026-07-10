@@ -13,6 +13,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 OUT_DIR="$BUILD_DIR/out"
 MODULE_TEMPLATE_DIR="$PROJECT_ROOT/module"
+WEBUI_DIR="$PROJECT_ROOT/webui"
 PACKAGE_DIR="$BUILD_DIR/package"
 
 COMMAND="${1:-package}"
@@ -336,6 +337,7 @@ package_module() {
 	compute_version
 
 	[[ -d "$MODULE_TEMPLATE_DIR" ]] || die "missing module template: $MODULE_TEMPLATE_DIR"
+	[[ -f "$WEBUI_DIR/index.html" ]] || die "missing WebUI: $WEBUI_DIR"
 	[[ -f "$OUT_DIR/yukizygisk.ko" ]] || die "missing build/out/yukizygisk.ko"
 	[[ -f "$OUT_DIR/zygiskd" ]] || die "missing build/out/zygiskd"
 
@@ -343,6 +345,7 @@ package_module() {
 	rm -rf "$PACKAGE_DIR"
 	mkdir -p "$PACKAGE_DIR"
 	cp -R "$MODULE_TEMPLATE_DIR/." "$PACKAGE_DIR/"
+	cp -R "$WEBUI_DIR" "$PACKAGE_DIR/webroot"
 	stamp_module_prop
 	cp "$PROJECT_ROOT/LICENSE" "$PACKAGE_DIR/LICENSE"
 	cp "$PROJECT_ROOT/LICENSE-GPL-2.0" "$PACKAGE_DIR/LICENSE-GPL-2.0"
@@ -358,7 +361,9 @@ package_module() {
 		"$PACKAGE_DIR/NOTICE"
 	chmod 0755 "$PACKAGE_DIR/zygiskd" "$PACKAGE_DIR/post-fs-data.sh" \
 		"$PACKAGE_DIR/boot-completed.sh" "$PACKAGE_DIR/customize.sh" \
+		"$PACKAGE_DIR/action.sh" \
 		2>/dev/null || true
+	find "$PACKAGE_DIR/webroot" -type f -exec chmod 0644 {} +
 
 	local zip_name="YukiZygisk-${VERSION_NAME}-${KMI}-${ABI}.zip"
 	local zip_path="$OUT_DIR/$zip_name"

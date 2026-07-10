@@ -28,5 +28,8 @@ Third-party components
     tree; packaged builds include the LSPlt license as LICENSE-LSPLT.
   - XZ Embedded is by Lasse Collin and Igor Pavlov and has been placed in the
     public domain by its authors.
+  - The WebUI bridge and static frontend structure are adapted from
+    KOWX712/ksu-webui-demo under the MIT License. Copyright (c) 2025 KOWX712.
+    The license is included in webui/LICENSE and packaged with the WebUI.
 
 SPDX-License-Identifier: Apache-2.0 OR GPL-2.0

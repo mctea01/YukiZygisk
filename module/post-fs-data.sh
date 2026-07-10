@@ -19,6 +19,12 @@ mkdir -p "$BASE_DIR" "$LIB_DIR" "$RUN_DIR"
 chmod 0755 "$BASE_DIR" "$LIB_DIR" "$RUN_DIR"
 touch "$LOG_FILE" 2>/dev/null || true
 
+if [ ! -f "$CONFIG_FILE" ]; then
+	printf '%s\n' '{"yukilinker":true,"denylist_mode":0,"dmesg_log":false,"denylist_app_ids":[]}' \
+		>"$CONFIG_FILE"
+fi
+chmod 0600 "$CONFIG_FILE" 2>/dev/null || true
+
 log() {
 	echo "post-fs-data: $*" >>"$LOG_FILE"
 }

@@ -33,6 +33,7 @@ enum class Request : uint8_t {
   RestoreNativeLoadPolicy = 17,
   ReportNativeInjection = 18,
   CheckStatus = 19,
+  Reload = 20,
 };
 
 inline constexpr uint32_t kNativeModuleNameMax = 64;

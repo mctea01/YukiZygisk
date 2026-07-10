@@ -1,0 +1,7 @@
+{
+  "title": "YukiZygisk",
+  "icon": "icon.svg",
+  "windowResize": false,
+  "backHandler": false,
+  "exitConfirm": false
+}
