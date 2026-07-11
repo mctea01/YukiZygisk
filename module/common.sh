@@ -35,3 +35,25 @@ yz_list_supported_kmis() {
 	done
 	[ "$yz_found" = true ]
 }
+
+yz_module_list_has() {
+	yz_wanted_module="$1"
+	while read -r yz_module_name _; do
+		[ "$yz_module_name" = "$yz_wanted_module" ] && return 0
+	done
+	return 1
+}
+
+yz_lsmod() {
+	if command -v lsmod >/dev/null 2>&1; then
+		lsmod
+	elif command -v toybox >/dev/null 2>&1; then
+		toybox lsmod
+	else
+		return 127
+	fi
+}
+
+yz_ksu_module_loaded() {
+	yz_lsmod 2>/dev/null | yz_module_list_has kernelsu
+}

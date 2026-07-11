@@ -80,8 +80,14 @@ if grep -q '^yukizygisk ' /proc/modules 2>/dev/null; then
 fi
 
 INSMOD="$(command -v insmod 2>/dev/null || echo /system/bin/insmod)"
-log "loading $KERNEL_MODULE for $KMI (release=$KERNEL_RELEASE) cookie=$COOKIE"
+KSU_MODULE_PRESENT=0
+if yz_ksu_module_loaded; then
+	KSU_MODULE_PRESENT=1
+	log "KernelSU module detected by lsmod"
+fi
+log "loading $KERNEL_MODULE for $KMI (release=$KERNEL_RELEASE) cookie=$COOKIE ksu_module_present=$KSU_MODULE_PRESENT"
 if ! "$INSMOD" "$KERNEL_MODULE" bootstrap_cookie_lo="$COOKIE" \
+	ksu_module_present="$KSU_MODULE_PRESENT" \
 	>>"$LOG_FILE" 2>&1; then
 	log "insmod failed"
 	exit 0

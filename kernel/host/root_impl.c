@@ -39,7 +39,6 @@
 #define YZ_KP_MAX_VMAP_AREAS 4096
 #define YZ_KP_VM_FLAGS 0x44UL
 #define YZ_KP_SU_NAME "su_get_path"
-#define YZ_KSU_ALLOWLIST_PATH "/data/adb/ksu/.allowlist"
 
 #define YZ_ROOT_FLAG_KSU_REDIRECT (1U << 0)
 
@@ -99,10 +98,14 @@ enum yz_root_owner yz_root_owner = YZ_ROOT_OWNER_NONE;
 bool yz_root_policy_allowed;
 static bool yz_root_policy_fallback;
 static bool yz_force_policy_fallback;
+static bool yz_ksu_module_present;
 module_param_named(force_policy_fallback, yz_force_policy_fallback, bool,
 		   0600);
 MODULE_PARM_DESC(force_policy_fallback,
 		 "Force the authenticated userspace denylist cache backend.");
+module_param_named(ksu_module_present, yz_ksu_module_present, bool, 0400);
+MODULE_PARM_DESC(ksu_module_present,
+		 "KernelSU module name was found by the userspace lsmod probe.");
 static DEFINE_MUTEX(yz_policy_cache_lock);
 static struct yz_policy_cache __rcu *yz_policy_cache;
 yz_ksu_is_allow_uid_fn yz_ksu_is_allow_uid_ptr;
@@ -569,19 +572,6 @@ static bool yz_apatch_detect(void)
 	return false;
 }
 
-static bool yz_path_exists(const char *path)
-{
-	struct file *file;
-
-	if (!path)
-		return false;
-	file = yz_open_ro(path);
-	if (IS_ERR(file))
-		return false;
-	yz_close_file(file);
-	return true;
-}
-
 static bool yz_ksu_detect(bool *policy_available)
 {
 	unsigned long addr;
@@ -630,9 +620,10 @@ static bool yz_ksu_detect(bool *policy_available)
 		}
 	}
 
-	if (yz_path_exists(YZ_KSU_ALLOWLIST_PATH)) {
+	if (yz_ksu_module_present) {
 		yz_root_mask |= YZ_ROOT_KSU;
 		seen = true;
+		pr_info("yukizygisk: KernelSU module detected by userspace lsmod\n");
 	}
 
 	if (seen)

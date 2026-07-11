@@ -36,4 +36,18 @@ if yz_detect_kmi "6.6.56-vendor-kernel" >/dev/null; then
 	exit 1
 fi
 
+if ! printf '%s\n' \
+	'Module                  Size  Used by' \
+	'kernelsu              123456  0' | yz_module_list_has kernelsu; then
+	echo "kernelsu lsmod entry was not detected" >&2
+	exit 1
+fi
+
+if printf '%s\n' \
+	'Module                  Size  Used by' \
+	'not_kernelsu          123456  0' | yz_module_list_has kernelsu; then
+	echo "non-KernelSU module unexpectedly matched kernelsu" >&2
+	exit 1
+fi
+
 echo "module KMI detection fixtures passed"
