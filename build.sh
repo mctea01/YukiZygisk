@@ -12,6 +12,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 OUT_DIR="$BUILD_DIR/out"
+LKM_OUT_DIR="$OUT_DIR/lkm"
 MODULE_TEMPLATE_DIR="$PROJECT_ROOT/module"
 WEBUI_DIR="$PROJECT_ROOT/webui"
 PACKAGE_DIR="$BUILD_DIR/package"
@@ -31,6 +32,17 @@ SKIP_PAYLOADS=false
 KEEP_BUILD=false
 STRIP_ANDROID=true
 VERBOSE=false
+ALL_KMIS=false
+
+KMI_TARGETS=(
+	android12-5.10
+	android13-5.10
+	android13-5.15
+	android14-5.15
+	android14-6.1
+	android15-6.6
+	android16-6.12
+)
 
 usage() {
 	cat <<EOF
@@ -40,11 +52,12 @@ Usage:
   ./build.sh [package|kernel|daemon|payloads|clean] [options]
 
 Options:
-  -k, --kmi KMI              DDK target for yukizygisk.ko (default: .ddk-version)
+  -k, --kmi KMI              Build/package one DDK target (default: .ddk-version)
+      --all-kmis             Build/package every supported KMI
   -a, --abi ABI              Android ABI for userspace daemon (default: arm64-v8a)
       --android-platform API Android platform for daemon (default: android-29)
       --ndk PATH             Android NDK path
-      --skip-kernel          Reuse build/out/yukizygisk.ko
+      --skip-kernel          Reuse KMI-tagged modules in build/out/lkm
       --skip-daemon          Reuse build/out/zygiskd
       --skip-payloads        Reuse build/out/lib*.so runtime payloads
       --keep-build           Keep intermediate build directories
@@ -59,6 +72,10 @@ while [[ $# -gt 0 ]]; do
 	-k | --kmi)
 		KMI="$2"
 		shift 2
+		;;
+	--all-kmis)
+		ALL_KMIS=true
+		shift
 		;;
 	-a | --abi)
 		ABI="$2"
@@ -170,6 +187,16 @@ strip_android_file() {
 	"$strip" "$mode" "$file"
 }
 
+strip_kernel_file() {
+	local file="$1"
+	[[ "$STRIP_ANDROID" == true ]] || return 0
+	if command -v llvm-strip >/dev/null 2>&1; then
+		llvm-strip -d "$file"
+	else
+		strip_android_file -d "$file"
+	fi
+}
+
 check_common_deps() {
 	need_cmd cmake
 	need_cmd ninja
@@ -206,24 +233,77 @@ stamp_module_prop() {
 	fi
 }
 
+kernel_targets() {
+	if [[ "$ALL_KMIS" == true ]]; then
+		printf '%s\n' "${KMI_TARGETS[@]}"
+	else
+		printf '%s\n' "$KMI"
+	fi
+}
+
+validate_kmi() {
+	local target="$1"
+	[[ "$target" =~ ^android[0-9]+-[0-9]+\.[0-9]+$ ]] ||
+		die "invalid KMI target: $target"
+}
+
+lkm_output_path() {
+	printf '%s/%s_yukizygisk.ko\n' "$LKM_OUT_DIR" "$1"
+}
+
+check_staged_kernels() {
+	local target output
+	while IFS= read -r target; do
+		validate_kmi "$target"
+		output="$(lkm_output_path "$target")"
+		[[ -f "$output" ]] || die "missing staged kernel module: $output"
+	done < <(kernel_targets)
+}
+
+build_one_kernel() {
+	local target="$1"
+	local output
+	validate_kmi "$target"
+	output="$(lkm_output_path "$target")"
+
+	info "Build yukizygisk.ko with DDK ($target)"
+	case "$target" in
+	android15-6.6 | android16-6.12)
+		ddk build --target "$target" -- W=1
+		;;
+	*)
+		ddk build --target "$target"
+		;;
+	esac
+	[[ -f "$PROJECT_ROOT/kernel/yukizygisk.ko" ]] ||
+		die "DDK build completed but kernel/yukizygisk.ko is missing"
+
+	mkdir -p "$LKM_OUT_DIR"
+	cp "$PROJECT_ROOT/kernel/yukizygisk.ko" "$output"
+	strip_kernel_file "$output"
+	info "Kernel: $output"
+}
+
 build_kernel() {
 	if [[ "$SKIP_KERNEL" == true ]]; then
-		[[ -f "$OUT_DIR/yukizygisk.ko" ]] ||
-			die "--skip-kernel requested but build/out/yukizygisk.ko is missing"
+		check_staged_kernels
 		info "Skip kernel build"
 		return
 	fi
 
 	check_kernel_deps
-	info "Build yukizygisk.ko with DDK ($KMI)"
-	ddk build --target "$KMI" -- W=1
-	[[ -f "$PROJECT_ROOT/kernel/yukizygisk.ko" ]] ||
-		die "DDK build completed but kernel/yukizygisk.ko is missing"
-
-	mkdir -p "$OUT_DIR"
-	cp "$PROJECT_ROOT/kernel/yukizygisk.ko" "$OUT_DIR/yukizygisk.ko"
-	strip_android_file -d "$OUT_DIR/yukizygisk.ko"
-	info "Kernel: $OUT_DIR/yukizygisk.ko"
+	local target
+	if [[ "$ALL_KMIS" == true ]]; then
+		while IFS= read -r target; do
+			rm -f "$(lkm_output_path "$target")"
+		done < <(kernel_targets)
+	fi
+	while IFS= read -r target; do
+		build_one_kernel "$target"
+		if [[ "$ALL_KMIS" == true ]]; then
+			ddk clean --target "$target" >/dev/null 2>&1 || true
+		fi
+	done < <(kernel_targets)
 }
 
 build_daemon() {
@@ -338,8 +418,8 @@ package_module() {
 
 	[[ -d "$MODULE_TEMPLATE_DIR" ]] || die "missing module template: $MODULE_TEMPLATE_DIR"
 	[[ -f "$WEBUI_DIR/index.html" ]] || die "missing WebUI: $WEBUI_DIR"
-	[[ -f "$OUT_DIR/yukizygisk.ko" ]] || die "missing build/out/yukizygisk.ko"
 	[[ -f "$OUT_DIR/zygiskd" ]] || die "missing build/out/zygiskd"
+	check_staged_kernels
 
 	info "Stage module"
 	rm -rf "$PACKAGE_DIR"
@@ -352,11 +432,16 @@ package_module() {
 	cp "$PROJECT_ROOT/NOTICE" "$PACKAGE_DIR/NOTICE"
 	cp "$PROJECT_ROOT/userspace/zygisk/third_party/lsplt/LICENSE" \
 		"$PACKAGE_DIR/LICENSE-LSPLT"
-	cp "$OUT_DIR/yukizygisk.ko" "$PACKAGE_DIR/yukizygisk.ko"
+	mkdir -p "$PACKAGE_DIR/lkm"
+	local target source
+	while IFS= read -r target; do
+		source="$(lkm_output_path "$target")"
+		cp "$source" "$PACKAGE_DIR/lkm/${target}_yukizygisk.ko"
+	done < <(kernel_targets)
 	cp "$OUT_DIR/zygiskd" "$PACKAGE_DIR/zygiskd"
 	stage_payloads
 
-	chmod 0644 "$PACKAGE_DIR/module.prop" "$PACKAGE_DIR/yukizygisk.ko" \
+	chmod 0644 "$PACKAGE_DIR/module.prop" "$PACKAGE_DIR"/lkm/*.ko \
 		"$PACKAGE_DIR"/lib*.so "$PACKAGE_DIR"/LICENSE* \
 		"$PACKAGE_DIR/NOTICE"
 	chmod 0755 "$PACKAGE_DIR/zygiskd" "$PACKAGE_DIR/post-fs-data.sh" \
@@ -365,20 +450,28 @@ package_module() {
 		2>/dev/null || true
 	find "$PACKAGE_DIR/webroot" -type f -exec chmod 0644 {} +
 
-	local zip_name="YukiZygisk-${VERSION_NAME}-${KMI}-${ABI}.zip"
+	local package_target="$KMI"
+	if [[ "$ALL_KMIS" == true ]]; then
+		package_target="all-kmi"
+	fi
+	local zip_name="YukiZygisk-${VERSION_NAME}-${package_target}-${ABI}.zip"
 	local zip_path="$OUT_DIR/$zip_name"
 	rm -f "$zip_path"
 	info "Create module zip: $zip_path"
+	find "$PACKAGE_DIR" -type f -exec touch -t 198001010000 {} +
 	(
 		cd "$PACKAGE_DIR"
-		zip -qr "$zip_path" .
+		LC_ALL=C find . -type f -print | LC_ALL=C sort | zip -qX "$zip_path" -@
 	)
 	info "Done: $zip_path"
 }
 
 clean() {
 	rm -rf "$BUILD_DIR"
-	ddk clean --target "$KMI" >/dev/null 2>&1 || true
+	local target
+	while IFS= read -r target; do
+		ddk clean --target "$target" >/dev/null 2>&1 || true
+	done < <(kernel_targets)
 	info "Cleaned"
 }
 
@@ -399,7 +492,9 @@ package)
 	package_module
 	if [[ "$KEEP_BUILD" != true ]]; then
 		rm -rf "${BUILD_DIR:?}/$ABI" "${PACKAGE_DIR:?}"
-		ddk clean --target "$KMI" >/dev/null 2>&1 || true
+		if [[ "$ALL_KMIS" != true ]]; then
+			ddk clean --target "$KMI" >/dev/null 2>&1 || true
+		fi
 	fi
 	;;
 clean)

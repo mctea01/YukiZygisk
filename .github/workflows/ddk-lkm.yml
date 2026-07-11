@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# YukiZygisk reusable DDK kernel-module build workflow.
+#
+# License: Apache-2.0
+#
+# Author: Anatdx
+
+name: Build YukiZygisk kernel module
+
+on:
+  workflow_call:
+    inputs:
+      kmi:
+        description: GKI KMI target
+        required: true
+        type: string
+      ddk_release:
+        description: DDK container release
+        required: false
+        default: "20260313"
+        type: string
+  workflow_dispatch:
+    inputs:
+      kmi:
+        description: GKI KMI target
+        required: true
+        default: android16-6.12
+        type: string
+      ddk_release:
+        description: DDK container release
+        required: false
+        default: "20260313"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-lkm:
+    name: Build ${{ inputs.kmi }}_yukizygisk.ko
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build kernel module
+        env:
+          KMI: ${{ inputs.kmi }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [ -z "${KDIR:-}" ] || [ ! -f "$KDIR/Makefile" ]; then
+            echo "KDIR is unavailable in the DDK container: ${KDIR:-<empty>}"
+            exit 1
+          fi
+
+          make_args=(-C kernel -j"$(nproc --all)" KDIR="$KDIR" CC=clang)
+          case "$KMI" in
+            android15-6.6|android16-6.12) make_args+=(W=1) ;;
+          esac
+          make "${make_args[@]}"
+
+          mkdir -p build/out/lkm
+          output="build/out/lkm/${KMI}_yukizygisk.ko"
+          cp kernel/yukizygisk.ko "$output"
+          llvm-strip -d "$output"
+          test -s "$output"
+          ls -lh "$output"
+
+      - name: Upload kernel module
+        uses: actions/upload-artifact@v6
+        with:
+          name: yukizygisk-lkm-${{ inputs.kmi }}
+          path: build/out/lkm/${{ inputs.kmi }}_yukizygisk.ko
+          if-no-files-found: error

@@ -53,14 +53,18 @@ add `KSU_IOCTL_YZ_*` or magic `'K'` here; that ABI remains with the integrated
 YukiSU/YukiZygisk module.
 
 The intended standalone package shape is a normal module: `post-fs-data.sh`
-generates a per-boot cookie, loads `yukizygisk.ko`, starts `zygiskd`, and lets
+detects the exact GKI KMI from `uname -r`, loads the matching
+`lkm/<kmi>_yukizygisk.ko` with a per-boot cookie, starts `zygiskd`, and lets
 zygiskd claim the anonymous control fd immediately through the bootstrap call.
-This intentionally gives up the early-native snapshot path as the default mode.
+Unknown or missing KMI targets fail closed. This intentionally gives up the
+early-native snapshot path as the default mode.
 
 Build shape:
 
 ```bash
-ddk build -- W=1
+./build.sh kernel -k android15-6.6
+./build.sh kernel --all-kmis
 ```
 
-The target is pinned by `.ddk-version`.
+The default single target is pinned by `.ddk-version`; KMI-tagged outputs are
+written under `build/out/lkm/`.

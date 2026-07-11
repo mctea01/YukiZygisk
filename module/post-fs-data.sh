@@ -29,6 +29,25 @@ log() {
 	echo "post-fs-data: $*" >>"$LOG_FILE"
 }
 
+if [ ! -f "$MODDIR/common.sh" ]; then
+	log "missing module KMI helpers"
+	exit 0
+fi
+# shellcheck source=/dev/null
+. "$MODDIR/common.sh"
+
+KERNEL_RELEASE="$(uname -r 2>/dev/null)"
+if ! KMI="$(yz_detect_kmi "$KERNEL_RELEASE")"; then
+	log "cannot detect GKI KMI from kernel release: $KERNEL_RELEASE"
+	exit 0
+fi
+KERNEL_MODULE="$(yz_kmi_ko "$MODDIR" "$KMI")"
+if [ ! -f "$KERNEL_MODULE" ]; then
+	SUPPORTED_KMIS="$(yz_list_supported_kmis "$MODDIR" | tr '\n' ' ')"
+	log "missing kernel module for $KMI; available: ${SUPPORTED_KMIS:-none}"
+	exit 0
+fi
+
 random_cookie() {
 	c="$(od -An -N8 -tx8 /dev/urandom 2>/dev/null | tr -d ' \n')"
 	if [ -n "$c" ]; then
@@ -61,8 +80,8 @@ if grep -q '^yukizygisk ' /proc/modules 2>/dev/null; then
 fi
 
 INSMOD="$(command -v insmod 2>/dev/null || echo /system/bin/insmod)"
-log "loading yukizygisk.ko cookie=$COOKIE"
-if ! "$INSMOD" "$MODDIR/yukizygisk.ko" bootstrap_cookie_lo="$COOKIE" \
+log "loading $KERNEL_MODULE for $KMI (release=$KERNEL_RELEASE) cookie=$COOKIE"
+if ! "$INSMOD" "$KERNEL_MODULE" bootstrap_cookie_lo="$COOKIE" \
 	>>"$LOG_FILE" 2>&1; then
 	log "insmod failed"
 	exit 0

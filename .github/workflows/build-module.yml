@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# YukiZygisk all-KMI module build and packaging workflow.
+#
+# License: Apache-2.0
+#
+# Author: Anatdx
+
+name: Build YukiZygisk module
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/**
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-lkm:
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    uses: ./.github/workflows/ddk-lkm.yml
+    with:
+      kmi: ${{ matrix.kmi }}
+      ddk_release: "20260313"
+
+  build-userspace:
+    name: Build arm64 userspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Validate module scripts
+        run: |
+          set -euo pipefail
+          bash -n build.sh tests/module-kmi.sh
+          sh -n module/*.sh
+          shellcheck build.sh tests/module-kmi.sh module/*.sh
+          ./tests/module-kmi.sh
+
+      - name: Build daemon and runtime payloads
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_NDK_HOME:-}"
+          ./build.sh daemon
+          ./build.sh payloads
+
+      - name: Upload userspace artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: yukizygisk-userspace-arm64-v8a
+          path: |
+            build/out/zygiskd
+            build/out/libzygisk.so
+            build/out/libyukilinker.so
+            build/out/libyukizncore.so
+          if-no-files-found: error
+
+  package:
+    name: Package all KMIs
+    needs:
+      - build-lkm
+      - build-userspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Download all kernel modules
+        uses: actions/download-artifact@v7
+        with:
+          pattern: yukizygisk-lkm-*
+          path: build/out/lkm
+          merge-multiple: true
+
+      - name: Download userspace artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: yukizygisk-userspace-arm64-v8a
+          path: build/out
+
+      - name: Create all-KMI module package
+        run: |
+          set -euo pipefail
+          ./build.sh package --all-kmis --skip-kernel --skip-daemon --skip-payloads
+          unzip -Z1 build/out/YukiZygisk-*-all-kmi-arm64-v8a.zip | sort
+
+      - name: Upload module package
+        uses: actions/upload-artifact@v6
+        with:
+          name: YukiZygisk-module-all-kmi-arm64-v8a
+          path: build/out/YukiZygisk-*-all-kmi-arm64-v8a.zip
+          if-no-files-found: error

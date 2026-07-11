@@ -17,13 +17,17 @@ Start here:
 
 ## Kernel LKM Skeleton
 
-The first standalone kernel skeleton lives in [kernel](kernel). It imports the
-current YukiSU YukiZygisk kernel feature files and builds an Android
-`android16-6.12` LKM through DDK:
+The standalone kernel sources live in [kernel](kernel). A single test KMI can
+be built through DDK:
 
 ```bash
-ddk build -- W=1
+./build.sh kernel -k android15-6.6
 ```
+
+The output is KMI-tagged as
+`build/out/lkm/android15-6.6_yukizygisk.ko`. Use `--all-kmis` to build all
+supported GKI targets locally. CI builds the seven supported targets as a
+matrix and assembles one release module package containing every KO.
 
 This is a buildable extraction checkpoint, not a complete runtime replacement
 for the YukiSU-integrated module yet. See the source inventory for the
@@ -63,11 +67,21 @@ enabled.
 The standalone control ABI is `YZ_IOCTL_*` with ioctl magic `'Y'` only. It does
 not accept the integrated YukiSU/YukiZygisk `KSU_IOCTL_YZ_*`/`'K'` ABI.
 
-The default packaging direction is a normal module containing `yukizygisk.ko`,
-`zygiskd`, `libzygisk.so`, `libyukilinker.so`, and `libyukizncore.so`, with
-`post-fs-data.sh` loading the LKM and starting the daemon. This gives up
-early-native injection by default; that capability can remain a future optional
-host backend rather than the baseline standalone path.
+The default package is a normal module containing `zygiskd`, `libzygisk.so`,
+`libyukilinker.so`, `libyukizncore.so`, and a KMI-specific LKM directory. A
+local test package may contain one `lkm/<kmi>_yukizygisk.ko`:
+
+```bash
+./build.sh package -k android15-6.6
+```
+
+A release package contains all supported KMIs and is produced with
+`./build.sh package --all-kmis` (or by CI's parallel matrix). During install
+and `post-fs-data`, the module derives the exact GKI KMI from `uname -r` and
+loads only the matching KO. Unknown releases and missing matches fail closed.
+The script then starts the daemon with the same bootstrap cookie. This gives
+up early-native injection by default; that capability can remain a future
+optional host backend rather than the baseline standalone path.
 
 The packaged WebUI has three pages: device/injection status, configuration,
 and about/credits. It does not own a separately configured denylist. The
