@@ -56,6 +56,13 @@ export async function enableEdgeToEdge(enabled = true) {
   return false;
 }
 
+export function setFullScreen(enabled = true) {
+  if (!hasKernelSU() || typeof globalThis.ksu.fullScreen !== "function")
+    return false;
+  globalThis.ksu.fullScreen(enabled);
+  return true;
+}
+
 export function toast(message) {
   if (hasKernelSU() && typeof globalThis.ksu.toast === "function") {
     globalThis.ksu.toast(String(message));

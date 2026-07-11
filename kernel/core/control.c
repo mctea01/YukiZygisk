@@ -97,6 +97,19 @@ static int yz_ioctl_get_safemode(void __user *arg)
 	return 0;
 }
 
+static int yz_ioctl_get_zygote_variants(void __user *arg)
+{
+	struct yz_zygote_variants_cmd cmd;
+	int ret;
+
+	ret = yz_zygote_probe_get_variants(&cmd);
+	if (ret)
+		return ret;
+	if (copy_to_user(arg, &cmd, sizeof(cmd)))
+		return -EFAULT;
+	return 0;
+}
+
 static int yz_ioctl_get_root_status(void __user *arg)
 {
 	struct yz_host_root_status status = { 0 };
@@ -369,6 +382,8 @@ static long yukizygisk_ioctl(struct file *file, unsigned int request,
 		return yz_ioctl_uid_should_umount(uarg);
 	case YZ_IOCTL_SET_POLICY_CACHE:
 		return yz_ioctl_set_policy_cache(uarg);
+	case YZ_IOCTL_GET_ZYGOTE_VARIANTS:
+		return yz_ioctl_get_zygote_variants(uarg);
 	default:
 		return -ENOTTY;
 	}

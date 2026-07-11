@@ -7,7 +7,7 @@
  */
 
 import { DEFAULT_CONFIG, DEFAULT_STATUS, PATHS, api, getRuntimeMode } from "./api.js";
-import { enableEdgeToEdge, toast as nativeToast } from "./assets/kernelsu.js";
+import { enableEdgeToEdge, setFullScreen, toast as nativeToast } from "./assets/kernelsu.js";
 import { LANGUAGE_OPTIONS, getNavigatorLanguage, translations } from "./i18n.js";
 
 const TABS = [
@@ -19,6 +19,7 @@ const TABS = [
 const params = new URLSearchParams(globalThis.location?.search || "");
 const requestedTab = params.get("tab");
 const storedLanguage = localStorage.getItem("yukizygisk_language");
+const storedNativeView = localStorage.getItem("yukizygisk_native_view");
 
 const state = {
   tab: TABS.some((tab) => tab.id === requestedTab) ? requestedTab : "status",
@@ -26,6 +27,7 @@ const state = {
     ? storedLanguage
     : getNavigatorLanguage(),
   theme: localStorage.getItem("yukizygisk_theme") || "system",
+  nativeView: storedNativeView === "process" ? "process" : "module",
   runtimeMode: getRuntimeMode(),
   status: { ...DEFAULT_STATUS },
   config: { ...DEFAULT_CONFIG },
@@ -61,6 +63,7 @@ function icon(name, className = "") {
     refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
     theme: '<path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>',
     reload: '<path d="M5 8a8 8 0 0 1 13.5-1.5L21 9M19 16A8 8 0 0 1 5.5 17.5L3 15"/><path d="M21 4v5h-5M3 20v-5h5"/>',
+    swap: '<path d="M7 7h12l-3-3m3 3-3 3M17 17H5l3 3m-3-3 3-3"/>',
     external: '<path d="M14 4h6v6m0-6-9 9"/><path d="M18 13v6H5V6h6"/>',
   };
   return `<svg class="icon ${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.info}</svg>`;
@@ -141,30 +144,65 @@ function metric(label, value) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
-function sectionHeader(title, description = "") {
-  return `<div class="section-heading"><div><h2>${escapeHtml(title)}</h2>${description ? `<p>${escapeHtml(description)}</p>` : ""}</div></div>`;
+function sectionHeader(title, description = "", trailing = "") {
+  return `<div class="section-heading"><div><h2>${escapeHtml(title)}</h2>${description ? `<p>${escapeHtml(description)}</p>` : ""}</div>${trailing}</div>`;
 }
 
 function infoItem(label, value, code = false) {
   return `<div><dt>${escapeHtml(label)}</dt><dd>${code ? `<code>${escapeHtml(value)}</code>` : escapeHtml(value)}</dd></div>`;
 }
 
-function renderModuleCards() {
+function renderZygiskModuleCards() {
   const standard = state.status.modules || [];
-  const native = state.status.native_modules || [];
-  const cards = [
-    ...standard.map((name) => ({ mark: "Z", name, detail: "Zygisk API", native: false, state: "injected" })),
-    ...native.map((module) => ({
-      mark: "N",
-      name: module.id,
-      detail: `${module.target_type}=${module.target}`,
-      native: true,
-      state: module.state,
-    })),
-  ];
-  if (!cards.length)
+  if (!standard.length)
     return emptyState(t("status.noModules"));
-  return cards.map((item) => `<article class="module-card ${item.native ? "native" : ""}"><div class="module-mark">${item.mark}</div><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.detail)}</span></div>${stateBadge(item.state)}</article>`).join("");
+  return standard.map((name) => `<article class="module-card"><div class="module-mark">Z</div><div><strong>${escapeHtml(name)}</strong><span>Zygisk API</span></div>${stateBadge("injected")}</article>`).join("");
+}
+
+function combinedNativeState(items, fallback = "failed") {
+  for (const candidate of ["crashed", "failed", "unsupported32", "injected"])
+    if (items.some((item) => item.state === candidate))
+      return candidate;
+  return fallback;
+}
+
+function renderNativeModules(injections) {
+  const modules = state.status.native_modules || [];
+  if (!modules.length)
+    return emptyState(t("status.noNativeModules"));
+  return modules.map((module) => {
+    const targets = injections.filter((item) => item.module === module.id);
+    const detail = `${module.target_type}=${module.target} · ${t("status.nativeProcessCount", "", { count: targets.length })}`;
+    return `<article class="module-card native"><div class="module-mark">N</div><div><strong>${escapeHtml(module.id)}</strong><span>${escapeHtml(detail)}</span></div>${stateBadge(combinedNativeState(targets, module.state))}</article>`;
+  }).join("");
+}
+
+function renderNativeProcesses(injections) {
+  const grouped = new Map();
+  for (const injection of injections) {
+    const key = `${injection.pid}\u0000${injection.process}`;
+    const row = grouped.get(key) || {
+      pid: injection.pid,
+      process: injection.process || injection.target,
+      abi: injection.abi,
+      modules: [],
+      records: [],
+    };
+    if (!row.modules.includes(injection.module))
+      row.modules.push(injection.module);
+    row.records.push(injection);
+    grouped.set(key, row);
+  }
+  const processes = [...grouped.values()].sort((a, b) =>
+    a.process.localeCompare(b.process) || Number(a.pid) - Number(b.pid));
+  if (!processes.length)
+    return emptyState(t("status.noNativeInjections"));
+  return processes.map((item) => `<div class="data-row native-row"><div class="identity"><strong>${escapeHtml(item.process)}</strong><span>${escapeHtml(item.modules.join(" · "))} · ${escapeHtml(item.abi)}</span></div><code>PID ${escapeHtml(item.pid)}</code>${stateBadge(combinedNativeState(item.records, "injected"))}</div>`).join("");
+}
+
+function nativeViewToggle() {
+  const label = state.nativeView === "module" ? t("status.nativeByModule") : t("status.nativeByProcess");
+  return `<button type="button" class="view-toggle" data-action="native-view" aria-label="${escapeHtml(t("status.nativeSwitchView"))}">${escapeHtml(label)} ${icon("swap")}</button>`;
 }
 
 function renderStatus() {
@@ -218,13 +256,13 @@ function renderStatus() {
     </section>
 
     <section class="panel span-2">
-      ${sectionHeader(t("status.modules"), t("status.modulesDesc"))}
-      <div class="module-grid">${renderModuleCards()}</div>
+      ${sectionHeader(t("status.modules"))}
+      <div class="module-grid">${renderZygiskModuleCards()}</div>
     </section>
 
     <section class="panel span-2">
-      ${sectionHeader(t("status.nativeInjections"), t("status.nativeInjectionsDesc"))}
-      <div class="data-list">${injections.length ? injections.map((item) => `<div class="data-row native-row"><div class="identity"><strong>${escapeHtml(item.process)}</strong><span>${escapeHtml(item.module)} · ${escapeHtml(item.target_type)}=${escapeHtml(item.target)}</span></div><code>PID ${escapeHtml(item.pid)}</code>${stateBadge(item.state)}</div>`).join("") : emptyState(t("status.noNativeInjections"))}</div>
+      ${sectionHeader(t("status.nativeInjections"), "", nativeViewToggle())}
+      <div class="${state.nativeView === "module" ? "module-grid" : "data-list"}">${state.nativeView === "module" ? renderNativeModules(injections) : renderNativeProcesses(injections)}</div>
     </section>
   </div>`;
 }
@@ -236,7 +274,7 @@ function switchCard(id, title, description, checked) {
 function renderSettings() {
   return `<div class="page-grid">
     <section class="panel span-2">
-      ${sectionHeader(t("settings.title"), t("settings.desc"))}
+      ${sectionHeader(t("settings.title"))}
       <div class="switch-list">
         ${switchCard("setting-yukilinker", t("settings.yukilinker"), t("settings.yukilinkerDesc"), state.config.yukilinker)}
         <label class="select-card"><span><strong>${escapeHtml(t("settings.denylistMode"))}</strong><small>${escapeHtml(t("settings.denylistDesc", "", { root: rootImplLabel() }))}</small></span><select id="denylist-mode"><option value="0" ${state.config.denylist_mode === 0 ? "selected" : ""}>${escapeHtml(t("settings.denylistOff"))}</option><option value="1" ${state.config.denylist_mode === 1 ? "selected" : ""}>${escapeHtml(t("settings.denylistSkip"))}</option><option value="2" ${state.config.denylist_mode === 2 ? "selected" : ""}>${escapeHtml(t("settings.denylistRevert"))}</option></select></label>
@@ -260,8 +298,8 @@ function renderSettings() {
 function renderAbout() {
   return `<div class="page-grid">
     <section class="about-hero span-2"><img src="./icon.svg" alt=""><div><h1>YukiZygisk</h1><p>${escapeHtml(t("about.description"))}</p><div class="chip-cloud"><span class="chip">${escapeHtml(state.meta.version)}</span><span class="chip">${escapeHtml(state.status.abi || "arm64-v8a")}</span><span class="chip">Apache-2.0 / GPL-2.0</span></div></div></section>
-    <section class="panel">${sectionHeader(t("about.project"))}<p class="body-copy">${escapeHtml(t("about.projectBody"))}</p><dl class="info-grid single">${infoItem(t("about.version"), state.meta.version)}${infoItem(t("about.author"), state.meta.author)}</dl></section>
-    <section class="panel">${sectionHeader(t("about.credits"))}<p class="body-copy">${escapeHtml(t("about.creditsBody"))}</p><a class="link-card" href="https://github.com/KOWX712/ksu-webui-demo">KOWX712/ksu-webui-demo${icon("external")}</a></section>
+    <section class="panel">${sectionHeader(t("about.project"))}<a class="link-card" href="https://github.com/Anatdx/YukiZygisk">Anatdx/YukiZygisk${icon("external")}</a></section>
+    <section class="panel">${sectionHeader(t("about.credits"))}<p class="body-copy">${escapeHtml(t("about.creditsBody"))}</p><div class="link-stack"><a class="link-card" href="https://github.com/tiann/KernelSU">KernelSU${icon("external")}</a><a class="link-card" href="https://github.com/KOWX712/ksu-webui-demo">KOWX712/ksu-webui-demo${icon("external")}</a></div></section>
   </div>`;
 }
 
@@ -375,6 +413,11 @@ document.addEventListener("click", async (event) => {
   if (action === "refresh") await refreshAll();
   if (action === "reload") await reloadRuntime();
   if (action === "save-config") await saveConfig();
+  if (action === "native-view") {
+    state.nativeView = state.nativeView === "module" ? "process" : "module";
+    localStorage.setItem("yukizygisk_native_view", state.nativeView);
+    renderApp();
+  }
   if (action === "theme") cycleTheme();
 });
 
@@ -390,6 +433,7 @@ document.addEventListener("change", (event) => {
 async function bootstrap() {
   applyTheme();
   document.documentElement.lang = state.language;
+  setFullScreen(true);
   await enableEdgeToEdge(true).catch(() => false);
   try {
     const [status, config, system, meta] = await Promise.all([

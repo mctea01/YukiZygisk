@@ -243,6 +243,23 @@ struct yz_policy_cache_cmd {
 	__u32 reserved;
 };
 
+#define YZ_ZYGOTE_VARIANT_MAX 4
+
+struct yz_zygote_variant {
+	__u32 pid;
+	__u32 crashes;
+	char name[YZ_ZYGOTE_NAME_MAX];
+};
+
+struct yz_zygote_variants_cmd {
+	__u32 count;
+	__u32 reserved;
+	struct yz_zygote_variant entries[YZ_ZYGOTE_VARIANT_MAX];
+};
+
+#define YZ_IOCTL_GET_ZYGOTE_VARIANTS                                \
+	_IOC(_IOC_READ, YZ_IOCTL_MAGIC, 64, 0)
+
 struct yz_config {
 	__u8 yukilinker;
 	__u8 denylist_mode;

@@ -35,6 +35,7 @@
 #include <elf.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstddef>
@@ -271,6 +272,13 @@ bool get_root_status(yz_root_status_cmd *status) {
     return false;
   *status = {};
   return ctl(YZ_IOCTL_GET_ROOT_STATUS, status) == 0;
+}
+
+bool get_zygote_variants(yz_zygote_variants_cmd *variants) {
+  if (variants == nullptr)
+    return false;
+  *variants = {};
+  return ctl(YZ_IOCTL_GET_ZYGOTE_VARIANTS, variants) == 0;
 }
 
 bool uid_should_umount(uint32_t uid) {
@@ -1068,6 +1076,31 @@ bool is_zygote_process_name(const std::string &name) {
   return name == "zygote" || name == "zygote32" || name == "zygote64";
 }
 
+std::vector<yz_zygote_variant> kernel_zygote_variants() {
+  yz_zygote_variants_cmd cmd{};
+  if (!yzhost::get_zygote_variants(&cmd))
+    return {};
+
+  std::vector<yz_zygote_variant> variants;
+  size_t count = std::min<size_t>(cmd.count, YZ_ZYGOTE_VARIANT_MAX);
+  variants.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    cmd.entries[i].name[sizeof(cmd.entries[i].name) - 1] = '\0';
+    if (cmd.entries[i].pid != 0 && cmd.entries[i].name[0] != '\0')
+      variants.push_back(cmd.entries[i]);
+  }
+  return variants;
+}
+
+std::string captured_zygote_name(
+    pid_t pid, const std::string &fallback,
+    const std::vector<yz_zygote_variant> &variants) {
+  for (const auto &variant : variants)
+    if (variant.pid == static_cast<uint32_t>(pid))
+      return variant.name;
+  return fallback;
+}
+
 bool parse_zygote_cmdline(pid_t pid, std::string *socket_name,
                           std::string *abi_list = nullptr) {
   char path[64];
@@ -1161,6 +1194,7 @@ bool is_zygote_injected(uint32_t pid, const std::string &name,
 
 std::vector<ZygoteMonitorRecord> scan_zygote_monitor() {
   std::vector<ZygoteMonitorRecord> out;
+  const auto variants = kernel_zygote_variants();
   DIR *d = opendir("/proc");
   if (d == nullptr)
     return out;
@@ -1178,6 +1212,7 @@ std::vector<ZygoteMonitorRecord> scan_zygote_monitor() {
     std::string abi_list;
     if (!parse_zygote_cmdline(pid, &name, &abi_list))
       continue;
+    name = captured_zygote_name(pid, name, variants);
     std::string abi = zygote_abi(pid, abi_list);
     std::string state = "failed";
     if (is_32bit_abi(abi))
@@ -1201,6 +1236,7 @@ void record_zygote(pid_t pid) {
   std::string name;
   if (!parse_zygote_cmdline(pid, &name))
     name = "zygote";
+  name = captured_zygote_name(pid, name, kernel_zygote_variants());
 
   for (auto it = g_zygotes.begin(); it != g_zygotes.end(); ++it) {
     if (it->pid == static_cast<uint32_t>(pid) ||

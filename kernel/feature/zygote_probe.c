@@ -391,35 +391,34 @@ static bool zp_zygote_safemode_should_skip(const char *name)
 		     (name && name[0]) ? name : "zygote");
 
 	spin_lock_irqsave(&zp_safemode_lock, flags);
+	slot = zp_zygote_guard_slot_locked(zygote, &free_slot);
+	if (slot < 0 && free_slot >= 0) {
+		slot = free_slot;
+		zp_copy_name(zp_zygote_guards[slot].name,
+			     sizeof(zp_zygote_guards[slot].name), zygote);
+	}
 	if (zp_safemode_active) {
+		if (slot >= 0)
+			zp_zygote_guards[slot].last_pid = pid;
 		skip = true;
 		crashes = zp_safemode_zygote_crashes;
-	} else {
-		slot = zp_zygote_guard_slot_locked(zygote, &free_slot);
-		if (slot < 0 && free_slot >= 0) {
-			slot = free_slot;
-			zp_copy_name(zp_zygote_guards[slot].name,
-				     sizeof(zp_zygote_guards[slot].name),
-				     zygote);
-		}
-		if (slot >= 0) {
-			struct zp_zygote_guard *guard = &zp_zygote_guards[slot];
+	} else if (slot >= 0) {
+		struct zp_zygote_guard *guard = &zp_zygote_guards[slot];
 
-			if (guard->last_pid == 0) {
-				guard->last_pid = pid;
-			} else if (guard->last_pid != pid) {
-				guard->last_pid = pid;
-				guard->zygote_crashes++;
-				crashes = guard->zygote_crashes;
-				if (crashes >= YZ_ZYGOTE_CRASH_THRESHOLD) {
-					WRITE_ONCE(zp_safemode_active, true);
-					zp_safemode_zygote_crashes = crashes;
-					zp_copy_name(zp_safemode_zygote,
-						     sizeof(zp_safemode_zygote),
-						     zygote);
-					activate = true;
-					skip = true;
-				}
+		if (guard->last_pid == 0) {
+			guard->last_pid = pid;
+		} else if (guard->last_pid != pid) {
+			guard->last_pid = pid;
+			guard->zygote_crashes++;
+			crashes = guard->zygote_crashes;
+			if (crashes >= YZ_ZYGOTE_CRASH_THRESHOLD) {
+				WRITE_ONCE(zp_safemode_active, true);
+				zp_safemode_zygote_crashes = crashes;
+				zp_copy_name(zp_safemode_zygote,
+					     sizeof(zp_safemode_zygote),
+					     zygote);
+				activate = true;
+				skip = true;
 			}
 		}
 	}
@@ -450,6 +449,35 @@ int yz_zygote_probe_get_safemode(struct yz_safemode_status_cmd *cmd)
 	cmd->active = zp_safemode_active ? 1 : 0;
 	cmd->zygote_crashes = zp_safemode_zygote_crashes;
 	zp_copy_name(cmd->zygote, sizeof(cmd->zygote), zp_safemode_zygote);
+	spin_unlock_irqrestore(&zp_safemode_lock, flags);
+	return 0;
+}
+
+int yz_zygote_probe_get_variants(struct yz_zygote_variants_cmd *cmd)
+{
+	unsigned long flags;
+	u32 count = 0;
+	int i;
+
+	if (!cmd)
+		return -EINVAL;
+
+	memset(cmd, 0, sizeof(*cmd));
+	spin_lock_irqsave(&zp_safemode_lock, flags);
+	for (i = 0; i < ZP_ZYGOTE_GUARD_MAX &&
+		    count < YZ_ZYGOTE_VARIANT_MAX;
+	     i++) {
+		struct zp_zygote_guard *guard = &zp_zygote_guards[i];
+		struct yz_zygote_variant *entry;
+
+		if (!guard->name[0] || guard->last_pid <= 0)
+			continue;
+		entry = &cmd->entries[count++];
+		entry->pid = (u32)guard->last_pid;
+		entry->crashes = guard->zygote_crashes;
+		zp_copy_name(entry->name, sizeof(entry->name), guard->name);
+	}
+	cmd->count = count;
 	spin_unlock_irqrestore(&zp_safemode_lock, flags);
 	return 0;
 }

@@ -500,6 +500,26 @@ a {
   font-size: 0.78rem;
 }
 
+.view-toggle {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  font-size: 0.74rem;
+  font-weight: 730;
+  white-space: nowrap;
+}
+
+.view-toggle .icon {
+  width: 17px;
+  height: 17px;
+}
+
 .data-list,
 .module-grid,
 .switch-list,
@@ -867,8 +887,7 @@ code,
   margin-bottom: 5px;
   color: var(--text-soft);
   font-size: 0.69rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.01em;
 }
 
 .info-grid dd {
@@ -973,6 +992,12 @@ code,
   background: var(--surface-muted);
   font-size: 0.82rem;
   font-weight: 720;
+}
+
+.link-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .bottom-nav {
