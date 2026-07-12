@@ -441,6 +441,36 @@ static YZ_INDIRECT_CALL int yz_policy_allow_all_sources(
 	return 0;
 }
 
+static YZ_INDIRECT_CALL int yz_policy_allow_named(
+	struct policydb *db, const char *source, const char *target,
+	const char *class_name, const char *const *perms, size_t perm_count)
+{
+	struct type_datum *source_type;
+	struct type_datum *target_type;
+	struct class_datum *cls;
+	struct yz_policy_key key;
+	u32 av;
+
+	source_type = yz_symtab_search_ptr(&db->p_types, source);
+	target_type = yz_symtab_search_ptr(&db->p_types, target);
+	cls = yz_symtab_search_ptr(&db->p_classes, class_name);
+	if (!source_type || source_type->attribute || !target_type ||
+	    target_type->attribute || !cls || source_type->value > U16_MAX ||
+	    target_type->value > U16_MAX || cls->value > U16_MAX)
+		return -ENOENT;
+
+	av = yz_policy_required_av(cls, perms, perm_count);
+	if (!av)
+		return -ENOENT;
+
+	key = (struct yz_policy_key){
+		.src_type = (u16)source_type->value,
+		.tgt_type = (u16)target_type->value,
+		.tclass = (u16)cls->value,
+	};
+	return yz_policy_apply_av(db, &key, av, true);
+}
+
 int yz_host_policy_prepare_runtime_current(void)
 {
 	struct task_security_struct *tsec;
@@ -490,8 +520,15 @@ int yz_host_policy_prepare_runtime_current(void)
 			goto out_cancel;
 	}
 
+	ret = yz_policy_allow_named(
+		&edit.load_state.policy->policydb, "system_server",
+		"system_server", "process", yz_process_execmem_perms,
+		ARRAY_SIZE(yz_process_execmem_perms));
+	if (ret)
+		goto out_cancel;
+
 	yz_policy_commit_edit_locked(&edit);
-	pr_info("yukizygisk: runtime SELinux communication allowed to daemon type=%s\n",
+	pr_info("yukizygisk: runtime SELinux communication allowed to daemon type=%s; system_server execmem allowed\n",
 		target_name);
 	ret = 0;
 	goto out_unlock;
