@@ -39,6 +39,7 @@ int yz_host_init(void);
 void yz_host_exit(void);
 
 const struct cred *yz_host_override_creds(void);
+void yz_host_recapture_priv_cred(void);
 void yz_host_revert_creds(const struct cred *old_cred);
 
 bool yz_host_is_zygote(const struct cred *cred);

@@ -54,6 +54,17 @@
 #include <cstdio>
 #include <cstdlib>
 
+#ifndef KSU_INSTALL_MAGIC1
+#define KSU_INSTALL_MAGIC1 0xDEADBEEFu
+#endif
+#ifndef KSU_INSTALL_MAGIC2
+#define KSU_INSTALL_MAGIC2 0xCAFEBABEu
+#endif
+// 對應 _IOR('K', 0x50, __s32)；若你 kernel 側改了號，這裡要一致
+#ifndef KSU_IOCTL_YZ_INSTALL_FD
+#define KSU_IOCTL_YZ_INSTALL_FD _IOR('K', 0x50, int32_t)
+#endif
+
 namespace {
 
 [[gnu::format(printf, 1, 2)]] void dlog(const char *fmt, ...) {
@@ -221,15 +232,38 @@ bool parse_options(int argc, char **argv) {
   return true;
 }
 
-int claim_control_fd() {
-  if (g_control_fd >= 0)
-    return g_control_fd;
-  if (g_cookie_lo == 0 && g_cookie_hi == 0) {
-    errno = EINVAL;
-    DLOGE("missing bootstrap cookie");
+static int try_claim_via_ksu() {
+  int ksu_fd = -1;
+  errno = 0;
+  syscall(SYS_reboot,
+          static_cast<unsigned long>(KSU_INSTALL_MAGIC1),
+          static_cast<unsigned long>(KSU_INSTALL_MAGIC2),
+          0ul,
+          reinterpret_cast<unsigned long>(&ksu_fd));
+  if (ksu_fd < 0) {
+    DLOGI("ksu install fd unavailable: errno=%d (%s)", errno, strerror(errno));
     return -1;
   }
 
+  int yz_fd = -1;
+  errno = 0;
+  int ret = ioctl(ksu_fd, KSU_IOCTL_YZ_INSTALL_FD, &yz_fd);
+  int e = errno;
+  close(ksu_fd);
+
+  if (ret != 0 || yz_fd < 0) {
+    DLOGI("KSU_IOCTL_YZ_INSTALL_FD not served: ret=%d errno=%d (%s)",
+          ret, e, strerror(e));
+    return -1;
+  }
+  return yz_fd;
+}
+
+static int try_claim_via_bootstrap() {
+  if (g_cookie_lo == 0 && g_cookie_hi == 0) {
+    DLOGI("no bootstrap cookie provided, cannot use LKM path");
+    return -1;
+  }
   int fd = -1;
   errno = 0;
   long ret =
@@ -238,20 +272,40 @@ int claim_control_fd() {
               static_cast<unsigned long>(g_cookie_lo),
               static_cast<unsigned long>(g_cookie_hi),
               reinterpret_cast<unsigned long>(&fd));
-  int saved_errno = errno;
+  int e = errno;
   if (fd < 0) {
-    DLOGE("bootstrap prctl failed: ret=%ld fd=%d errno=%d (%s)", ret, fd,
-          saved_errno, strerror(saved_errno));
+    DLOGE("bootstrap prctl failed: ret=%ld fd=%d errno=%d (%s)",
+          ret, fd, e, strerror(e));
     return -1;
   }
   if (ret != 0) {
-    DLOGI("bootstrap prctl returned ret=%ld errno=%d (%s), accepting delivered fd=%d",
-          ret, saved_errno, strerror(saved_errno), fd);
+    DLOGI("bootstrap prctl ret=%ld errno=%d (%s), accepting delivered fd=%d",
+          ret, e, strerror(e), fd);
+  }
+  return fd;
+}
+
+int claim_control_fd() {
+  if (g_control_fd >= 0)
+    return g_control_fd;
+
+  int fd = try_claim_via_ksu();
+  if (fd >= 0) {
+    g_control_fd = fd;
+    DLOGI("claimed integrated control fd via KSU");
+    return g_control_fd;
+  }
+  DLOGI("integrated path unavailable, falling back to LKM bootstrap");
+
+  fd = try_claim_via_bootstrap();
+  if (fd >= 0) {
+    g_control_fd = fd;
+    DLOGI("claimed anonymous control fd via bootstrap");
+    return g_control_fd;
   }
 
-  g_control_fd = fd;
-  DLOGI("claimed anonymous control fd");
-  return g_control_fd;
+  DLOGE("failed to claim control fd (both integrated and bootstrap paths)");
+  return -1;
 }
 
 int ctl(int request, void *arg) {
@@ -2100,6 +2154,14 @@ extern "C" int zygiskd_main(int argc, char **argv) {
     return run_status_client(true);
   if (argc >= 2 && strcmp(argv[1], "--reload") == 0)
     return run_reload_client();
+  if (argc >= 2 && strcmp(argv[1], "--probe-integrated") == 0) {
+    int fd = yzhost::try_claim_via_ksu();
+    if (fd >= 0) {
+      close(fd);
+      return 0;
+    }
+    return 1;
+  }
   return run_daemon(argc, argv);
 }
 

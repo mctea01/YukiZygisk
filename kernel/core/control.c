@@ -442,5 +442,8 @@ int yukizygisk_control_install_fd(void)
 	fd_install(fd, file);
 	pr_info("yukizygisk: anonymous control fd installed pid=%d fd=%d\n",
 		current->pid, fd);
+	/* current is the claiming daemon (u:r:ksu:s0); capture its cred so the
+	 * injection stage loader can read /data/adb even in built-in mode. */
+	yz_host_recapture_priv_cred();
 	return fd;
 }
