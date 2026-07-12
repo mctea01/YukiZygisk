@@ -73,6 +73,33 @@ const struct cred *yz_host_override_creds(void)
 	return yz_priv_cred ? yz_override_creds(yz_priv_cred) : NULL;
 }
 
+void yz_host_recapture_priv_cred(void)
+{
+	struct cred *fresh;
+	struct cred *old;
+
+	/*
+	 * Re-capture privileged creds from the *current* context.
+	 *
+	 * Called from the control-fd install path, which runs in the daemon
+	 * (zygiskd, u:r:ksu:s0) context. In built-in mode the initial capture
+	 * in yz_host_init() happens at device_initcall time, where current is a
+	 * kernel thread, yielding a u:r:kernel:s0 cred that cannot traverse
+	 * /data/adb on some OEM policies (EACCES on the injection stage loader).
+	 * The ksu-context cred captured here can, matching LKM behaviour, and it
+	 * is installed strictly before any app injection uses the loader.
+	 */
+	fresh = yz_prepare_creds();
+	if (!fresh) {
+		pr_warn("yukizygisk: recapture priv cred failed; keeping existing\n");
+		return;
+	}
+	old = xchg(&yz_priv_cred, fresh);
+	if (old)
+		yz_abort_creds(old);
+	pr_info("yukizygisk: privileged creds recaptured from current context\n");
+}
+
 void yz_host_revert_creds(const struct cred *old_cred)
 {
 	if (old_cred)

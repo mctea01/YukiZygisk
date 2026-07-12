@@ -13,6 +13,7 @@
 #endif
 #include "native_modules.hpp"
 #include "root_policy.hpp"
+#include "uapi/ksu_control.h"
 #include "uapi/yukizygisk.h"
 
 #include "json.hpp"
@@ -127,6 +128,10 @@ std::string g_config_path = kDefaultConfigPath;
 uint64_t g_cookie_lo = 0;
 uint64_t g_cookie_hi = 0;
 int g_control_fd = -1;
+// Set when the control fd was claimed via the integrated (built-in) KSU path
+// rather than the LKM bootstrap. In integrated mode the kernel arms no
+// bootstrap fail-closed guard, so the daemon-ready handshake is skipped.
+bool g_integrated = false;
 
 const std::string &modules_dir() { return g_modules_dir; }
 
@@ -186,12 +191,38 @@ void load_env() {
     parse_u64(env, &g_cookie_hi);
 }
 
-int claim_control_fd() {
-  if (g_control_fd >= 0)
-    return g_control_fd;
+// Integrated (built-in) path: ask the host KernelSU to install the anonymous
+// YukiZygisk control fd directly. Returns a valid fd or -1 when the running
+// kernel is not integrated (so the caller can fall back to the LKM bootstrap).
+int try_claim_via_ksu() {
+  int ksu_fd = -1;
+  errno = 0;
+  syscall(SYS_reboot, static_cast<unsigned long>(KSU_INSTALL_MAGIC1),
+          static_cast<unsigned long>(KSU_INSTALL_MAGIC2), 0ul,
+          reinterpret_cast<unsigned long>(&ksu_fd));
+  if (ksu_fd < 0) {
+    DLOGI("ksu install fd unavailable: errno=%d (%s)", errno, strerror(errno));
+    return -1;
+  }
+
+  int yz_fd = -1;
+  errno = 0;
+  int ret = ioctl(ksu_fd, KSU_IOCTL_YZ_INSTALL_FD, &yz_fd);
+  int e = errno;
+  close(ksu_fd);
+
+  if (ret != 0 || yz_fd < 0) {
+    DLOGI("KSU_IOCTL_YZ_INSTALL_FD not served: ret=%d errno=%d (%s)", ret, e,
+          strerror(e));
+    return -1;
+  }
+  return yz_fd;
+}
+
+int try_claim_via_bootstrap() {
   if (g_cookie_lo == 0 && g_cookie_hi == 0) {
     errno = EINVAL;
-    DLOGE("missing bootstrap cookie");
+    DLOGI("no bootstrap cookie provided, cannot use LKM path");
     return -1;
   }
 
@@ -214,10 +245,34 @@ int claim_control_fd() {
           "fd=%d",
           ret, saved_errno, strerror(saved_errno), fd);
   }
+  return fd;
+}
 
-  g_control_fd = fd;
-  DLOGI("claimed anonymous control fd");
-  return g_control_fd;
+int claim_control_fd() {
+  if (g_control_fd >= 0)
+    return g_control_fd;
+
+  // Prefer the integrated (built-in) kernel path. On an LKM kernel the KSU
+  // install ioctl is not served and this returns -1, so we fall back to the
+  // prctl+cookie bootstrap.
+  int fd = try_claim_via_ksu();
+  if (fd >= 0) {
+    g_control_fd = fd;
+    g_integrated = true;
+    DLOGI("claimed integrated control fd via KSU");
+    return g_control_fd;
+  }
+  DLOGI("integrated path unavailable, falling back to LKM bootstrap");
+
+  fd = try_claim_via_bootstrap();
+  if (fd >= 0) {
+    g_control_fd = fd;
+    DLOGI("claimed anonymous control fd via bootstrap");
+    return g_control_fd;
+  }
+
+  DLOGE("failed to claim control fd (both integrated and bootstrap paths)");
+  return -1;
 }
 
 int ctl(int request, void *arg) {
@@ -1687,7 +1742,11 @@ int run_daemon() {
   } else {
     DLOGI("no 32-bit zygote or native target; skipping zygiskd32");
   }
-  if (yzhost::ctl(YZ_IOCTL_DAEMON_READY, nullptr) != 0) {
+  // The daemon-ready handshake disarms the LKM bootstrap fail-closed guard.
+  // Integrated (built-in) kernels arm no such guard and the control fd is not a
+  // bootstrap fd, so the ioctl would be rejected; skip it in that mode.
+  if (!yzhost::g_integrated &&
+      yzhost::ctl(YZ_IOCTL_DAEMON_READY, nullptr) != 0) {
     DLOGE("kernel rejected daemon readiness: %s", strerror(errno));
     stop_compat_daemon(compat_pid);
     close(nlfd);
@@ -1738,5 +1797,18 @@ int run_daemon() {
 extern "C" int zygiskd_main() { return run_daemon(); }
 
 #ifndef YZ_ZYGISKD_NO_MAIN
-int main() { return zygiskd_main(); }
+int main(int argc, char **argv) {
+  // Lightweight probe used by post-fs-data.sh to decide whether the running
+  // kernel is integrated (built-in): exit 0 when the KSU control fd is served,
+  // non-zero otherwise. Does not start the daemon.
+  if (argc >= 2 && strcmp(argv[1], "--probe-integrated") == 0) {
+    int fd = yzhost::try_claim_via_ksu();
+    if (fd >= 0) {
+      close(fd);
+      return 0;
+    }
+    return 1;
+  }
+  return zygiskd_main();
+}
 #endif // #ifndef YZ_ZYGISKD_NO_MAIN

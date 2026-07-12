@@ -3,6 +3,15 @@
 #
 # YukiZygisk module post-fs-data entry point.
 #
+# One package supports both kernels:
+#   - Integrated (built-in) kernel: zygiskd claims the control fd through the
+#     KernelSU ioctl channel. NO insmod is performed.
+#   - LKM kernel: the matching .ko is insmod'd with a per-boot bootstrap
+#     cookie, then zygiskd claims via the prctl bootstrap.
+#
+# The integrated-vs-LKM decision is made by a single source of truth:
+# `zygiskd64 --probe-integrated` (exit 0 = the integrated path works).
+#
 # License: Apache-2.0
 #
 # Author: Anatdx
@@ -94,36 +103,7 @@ log() {
 	echo "post-fs-data: $*" >>"$LOG_FILE"
 }
 
-if [ ! -f "$MODDIR/common.sh" ]; then
-	log "missing module KMI helpers"
-	exit 0
-fi
-# shellcheck source=/dev/null
-. "$MODDIR/common.sh"
-
-KERNEL_RELEASE="$(uname -r 2>/dev/null)"
-if ! KMI="$(yz_detect_kmi "$KERNEL_RELEASE")"; then
-	log "cannot detect GKI KMI from kernel release: $KERNEL_RELEASE"
-	exit 0
-fi
-KERNEL_MODULE="$(yz_kmi_ko "$MODDIR" "$KMI")"
-if [ ! -f "$KERNEL_MODULE" ]; then
-	SUPPORTED_KMIS="$(yz_list_supported_kmis "$MODDIR" | tr '\n' ' ')"
-	log "missing kernel module for $KMI; available: ${SUPPORTED_KMIS:-none}"
-	exit 0
-fi
-
-random_cookie() {
-	c="$(od -An -N8 -tx8 /dev/urandom 2>/dev/null | tr -d ' \n')"
-	if [ -n "$c" ]; then
-		echo "0x$c"
-	else
-		echo "0x$(date +%s)$$"
-	fi
-}
-
-COOKIE="$(random_cookie)"
-
+# ---- deploy dual-ABI userspace payload (required in both modes) ----
 chmod 0755 "$MODDIR/zygiskd64" "$MODDIR/zygiskd32" "$MODDIR/yzctl" \
 	2>/dev/null || true
 
@@ -147,26 +127,72 @@ if ! rm -f "$LIB_DIR/libzygisk.so" "$LIB_DIR/libyukilinker.so" \
 	exit 0
 fi
 
-if grep -q '^yukizygisk ' /proc/modules 2>/dev/null; then
-	log "yukizygisk.ko already loaded"
-	exit 0
+# ---- probe: is the running kernel integrated (built-in)? ----
+INTEGRATED=0
+if "$MODDIR/zygiskd64" --probe-integrated >>"$LOG_FILE" 2>&1; then
+	INTEGRATED=1
+	log "integrated kernel detected; skipping insmod"
+else
+	log "integrated path unavailable; using LKM fallback"
 fi
 
-INSMOD="$(command -v insmod 2>/dev/null || echo /system/bin/insmod)"
-KSU_MODULE_PRESENT=0
-if yz_ksu_module_loaded; then
-	KSU_MODULE_PRESENT=1
-	log "KernelSU module detected by lsmod"
-fi
-log "loading $KERNEL_MODULE for $KMI (release=$KERNEL_RELEASE) cookie=$COOKIE ksu_module_present=$KSU_MODULE_PRESENT"
-if ! "$INSMOD" "$KERNEL_MODULE" bootstrap_cookie_lo="$COOKIE" \
-	ksu_module_present="$KSU_MODULE_PRESENT" \
-	>>"$LOG_FILE" 2>&1; then
-	log "insmod failed"
-	exit 0
+COOKIE=""
+
+if [ "$INTEGRATED" -eq 0 ]; then
+	# ---- LKM path: detect KMI, insmod the matching .ko with a cookie ----
+	if [ ! -f "$MODDIR/common.sh" ]; then
+		log "missing module KMI helpers; cannot use LKM path"
+		exit 0
+	fi
+	# shellcheck source=/dev/null
+	. "$MODDIR/common.sh"
+
+	KERNEL_RELEASE="$(uname -r 2>/dev/null)"
+	if ! KMI="$(yz_detect_kmi "$KERNEL_RELEASE")"; then
+		log "cannot detect GKI KMI from kernel release: $KERNEL_RELEASE"
+		exit 0
+	fi
+	KERNEL_MODULE="$(yz_kmi_ko "$MODDIR" "$KMI")"
+	if [ ! -f "$KERNEL_MODULE" ]; then
+		SUPPORTED_KMIS="$(yz_list_supported_kmis "$MODDIR" | tr '\n' ' ')"
+		log "missing kernel module for $KMI; available: ${SUPPORTED_KMIS:-none}"
+		exit 0
+	fi
+
+	random_cookie() {
+		c="$(od -An -N8 -tx8 /dev/urandom 2>/dev/null | tr -d ' \n')"
+		if [ -n "$c" ]; then
+			echo "0x$c"
+		else
+			echo "0x$(date +%s)$$"
+		fi
+	}
+	COOKIE="$(random_cookie)"
+
+	if grep -q '^yukizygisk ' /proc/modules 2>/dev/null; then
+		log "yukizygisk.ko already loaded"
+		exit 0
+	fi
+
+	INSMOD="$(command -v insmod 2>/dev/null || echo /system/bin/insmod)"
+	KSU_MODULE_PRESENT=0
+	if yz_ksu_module_loaded; then
+		KSU_MODULE_PRESENT=1
+		log "KernelSU module detected by lsmod"
+	fi
+	log "loading $KERNEL_MODULE for $KMI (release=$KERNEL_RELEASE) cookie=$COOKIE ksu_module_present=$KSU_MODULE_PRESENT"
+	if ! "$INSMOD" "$KERNEL_MODULE" bootstrap_cookie_lo="$COOKIE" \
+		ksu_module_present="$KSU_MODULE_PRESENT" \
+		>>"$LOG_FILE" 2>&1; then
+		log "insmod failed"
+		exit 0
+	fi
 fi
 
-log "starting zygiskd"
+# ---- start zygiskd (64-bit primary; it spawns zygiskd32 when needed) ----
+# In integrated mode COOKIE is empty and zygiskd claims via the KSU ioctl; in
+# LKM mode the cookie drives the prctl bootstrap claim.
+log "starting zygiskd (integrated=$INTEGRATED)"
 YUKIZYGISK_BOOTSTRAP_COOKIE_LO="$COOKIE" \
 YUKIZYGISK_CONFIG="$CONFIG_FILE" \
 YUKIZYGISK_LOG_DIR="$RUNTIME_LOG_DIR" \

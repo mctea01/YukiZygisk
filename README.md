@@ -2,6 +2,10 @@
 
 A new kernel-level Zygisk implementation designed to explore better, cleaner, and more flexible ways of injecting.
 
+Forked [Anatdx/YukiZygisk](https://github.com/Anatdx/YukiZygisk)
+
+Added GKI built-in Support.
+
 ## Kernel LKM Skeleton
 
 The standalone kernel sources live in [kernel](kernel). A single test KMI can
