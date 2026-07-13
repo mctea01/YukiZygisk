@@ -28,6 +28,10 @@ Third-party components
     tree; packaged builds include the LSPlt license as LICENSE-LSPLT.
   - XZ Embedded is by Lasse Collin and Igor Pavlov and has been placed in the
     public domain by its authors.
+  - The AArch64 TLSDESC resolver assembly includes work from the Android Open
+    Source Project under its original BSD license. Copyright (c) 2019 The
+    Android Open Source Project. The complete notice is retained in
+    userspace/zygisk/core/src/yukilinker_tlsdesc.S.
   - The WebUI bridge and static frontend structure are adapted from
     KOWX712/ksu-webui-demo under the MIT License. Copyright (c) 2025 KOWX712.
     The license is included in webui/LICENSE and packaged with the WebUI.
