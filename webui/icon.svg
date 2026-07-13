@@ -1,12 +1,49 @@
-<!-- SPDX-License-Identifier: MIT; Copyright (c) 2025 KOWX712 and Anatdx. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="YukiZygisk">
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0; derived from YukiSU docs/YukiSU-mini.svg by Anan. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 108 108" role="img" aria-label="YukiZygisk">
   <defs>
-    <linearGradient id="y" x1="18" y1="14" x2="108" y2="116" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#83ded3"/>
-      <stop offset="1" stop-color="#176e68"/>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4FC3F7;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0288D1;stop-opacity:1" />
     </linearGradient>
   </defs>
-  <rect x="8" y="8" width="112" height="112" rx="34" fill="#11231f"/>
-  <path d="M31 28h18l15 27 15-27h18L72 70v30H56V70L31 28Z" fill="url(#y)"/>
-  <path d="M83 81h18v8H83zm-8 12h26v8H75z" fill="#eaf8f5" opacity=".9"/>
+  <!-- Background rounded square -->
+  <rect x="4" y="4" width="100" height="100" rx="28" ry="28" fill="url(#bgGradient)"/>
+  <!-- Snowflake -->
+  <g transform="translate(54, 54) scale(1.2)" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round" fill="none">
+    <!-- Branch 0° -->
+    <line x1="0" y1="0" x2="0" y2="-25"/>
+    <line x1="0" y1="-15" x2="-4.5" y2="-19.5"/>
+    <line x1="0" y1="-15" x2="4.5" y2="-19.5"/>
+    <!-- Branch 60° -->
+    <g transform="rotate(60)">
+      <line x1="0" y1="0" x2="0" y2="-25"/>
+      <line x1="0" y1="-15" x2="-4.5" y2="-19.5"/>
+      <line x1="0" y1="-15" x2="4.5" y2="-19.5"/>
+    </g>
+    <!-- Branch 120° -->
+    <g transform="rotate(120)">
+      <line x1="0" y1="0" x2="0" y2="-25"/>
+      <line x1="0" y1="-15" x2="-4.5" y2="-19.5"/>
+      <line x1="0" y1="-15" x2="4.5" y2="-19.5"/>
+    </g>
+    <!-- Branch 180° -->
+    <g transform="rotate(180)">
+      <line x1="0" y1="0" x2="0" y2="-25"/>
+      <line x1="0" y1="-15" x2="-4.5" y2="-19.5"/>
+      <line x1="0" y1="-15" x2="4.5" y2="-19.5"/>
+    </g>
+    <!-- Branch 240° -->
+    <g transform="rotate(240)">
+      <line x1="0" y1="0" x2="0" y2="-25"/>
+      <line x1="0" y1="-15" x2="-4.5" y2="-19.5"/>
+      <line x1="0" y1="-15" x2="4.5" y2="-19.5"/>
+    </g>
+    <!-- Branch 300° -->
+    <g transform="rotate(300)">
+      <line x1="0" y1="0" x2="0" y2="-25"/>
+      <line x1="0" y1="-15" x2="-4.5" y2="-19.5"/>
+      <line x1="0" y1="-15" x2="4.5" y2="-19.5"/>
+    </g>
+  </g>
 </svg>
