@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# YukiZygisk runtime payload build targets.
+# YukiZygisk - runtime payload build targets.
 #
 # License: Apache-2.0
 #
@@ -34,6 +34,7 @@ add_library(zygisk SHARED
     # its own copy -- the separate libyukilinker first stage is then unloaded
     # right after handoff (zygisk_finalize_loader) instead of lingering.
     src/yukilinker.cpp
+    src/yukilinker_tlsdesc.S
     # synchronous self-unmap: capture-stub template + tail-call munmap.
     src/self_unmap.S
     # solist unlink and maps hiding helpers.
@@ -77,6 +78,7 @@ target_link_options(zygisk PRIVATE -Wl,--gc-sections -Wl,--strip-all
 add_library(yukizncore SHARED
     src/yukizncore.cpp
     src/yukilinker.cpp
+    src/yukilinker_tlsdesc.S
     src/self_unmap.S
     src/solist.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xz-embedded/xz_dec_lzma2.c
@@ -110,7 +112,9 @@ target_link_options(yukizncore PRIVATE -Wl,--gc-sections -Wl,--strip-all
 # libyukilinker.so -- the anonymous in-memory module loader, split into its own
 # .so that core dlopen+dlsym's at runtime (exports yuki_dlopen_memfd/dlsym/
 # dlclose). Same source as compiled-in; no lsplt/solist deps.
-add_library(yukilinker SHARED src/yukilinker.cpp)
+add_library(yukilinker SHARED
+    src/yukilinker.cpp
+    src/yukilinker_tlsdesc.S)
 set_target_properties(yukilinker PROPERTIES PREFIX "lib" OUTPUT_NAME yukilinker)
 target_include_directories(yukilinker PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
