@@ -1116,7 +1116,7 @@ extern "C" [[noreturn]] void yz_self_unmap_tail(void *base, size_t size);
 extern "C" __attribute__((visibility("hidden"))) void *__dso_handle;
 static inline void yz_finalize_self_dso() { __cxa_finalize(&__dso_handle); }
 
-void zygisk_self_destruct(JNIEnv *env, bool isolated, bool mounts_reverted) {
+void zygisk_self_destruct(JNIEnv *env, bool isolated, bool revert_mounts) {
   bool can_unmap = zygisk_specialize_fully_inline_hooked();
   zygisk_self_unhook(env);
   yz_drop_runtime_header_pages();
@@ -1127,7 +1127,7 @@ void zygisk_self_destruct(JNIEnv *env, bool isolated, bool mounts_reverted) {
   if (!isolated) {
     yuki::solist::hide_from_solist("libzygisk");
     yuki::solist::hide_from_solist("libyukilinker");
-    if (!mounts_reverted) {
+    if (revert_mounts) {
       bool reverted = yz_report_self_unmap();
       if (!reverted)
         yz_revert_self_mounts();
@@ -1149,6 +1149,16 @@ void zygisk_self_destruct(JNIEnv *env, bool isolated, bool mounts_reverted) {
   LOGE("self-unmap failed: core remains mapped at %p size=%zu",
        reinterpret_cast<void *>(cbase), csize);
   (void)env;
+}
+
+bool zygisk_app_core_unload_safe() {
+  size_t retained = 0;
+  for (const auto &m : g_modules)
+    if (m.handle != nullptr)
+      retained++;
+  if (retained != 0)
+    LOGI("core unload deferred: %zu module(s) remain resident", retained);
+  return retained == 0;
 }
 
 void zygisk_load_modules(JNIEnv *env) { load_modules_impl(env); }
