@@ -59,6 +59,8 @@ int yz_host_file_load_policy_allow_cred(
 	struct yz_file_load_policy *state);
 int yz_host_file_load_policy_allow_execmem_current(
 	struct yz_file_load_policy *state);
+int yz_host_file_load_policy_allow_execmem_cred(
+	const struct cred *cred, struct yz_file_load_policy *state);
 int yz_host_file_load_policy_restore(const struct yz_file_load_policy *state);
 int yz_host_umount_pid(pid_t pid);
 

@@ -323,7 +323,9 @@ int yz_host_policy_allow_file_cred(struct file *file, const struct cred *cred,
 	return yz_host_policy_allow_file(file, cred, true, false, state);
 }
 
-int yz_host_policy_allow_execmem_current(struct yz_file_load_policy *state)
+static int
+yz_host_policy_allow_execmem(const struct cred *cred,
+			     struct yz_file_load_policy *state)
 {
 	struct yz_policy_key key = {};
 	u32 required_av = 0;
@@ -331,18 +333,25 @@ int yz_host_policy_allow_execmem_current(struct yz_file_load_policy *state)
 	char src_name[YZ_POLICY_TYPE_NAME_MAX];
 	int ret;
 
-	if (!state)
+	if (!cred || !state)
 		return -EINVAL;
-	if (state->process_added_av)
-		return 0;
 
 	ret = yz_policy_base_lock();
 	if (ret)
 		return ret;
 
-	ret = yz_policy_base_get_execmem_key(&key, &required_av, src_name,
-					     sizeof(src_name));
+	ret = yz_policy_base_get_execmem_key(cred, &key, &required_av,
+					     src_name, sizeof(src_name));
 	if (ret)
+		goto out_unlock;
+	if ((state->src_type && state->src_type != key.src_type) ||
+	    (state->process_added_av &&
+	     (state->process_type != key.src_type ||
+	      state->process_class != key.tclass))) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	if (state->process_added_av)
 		goto out_unlock;
 
 	ret = yz_policy_temp_plan_allow_locked(&key, required_av,
@@ -372,6 +381,17 @@ int yz_host_policy_allow_execmem_current(struct yz_file_load_policy *state)
 out_unlock:
 	yz_policy_base_unlock();
 	return ret;
+}
+
+int yz_host_policy_allow_execmem_current(struct yz_file_load_policy *state)
+{
+	return yz_host_policy_allow_execmem(current_cred(), state);
+}
+
+int yz_host_policy_allow_execmem_cred(const struct cred *cred,
+				      struct yz_file_load_policy *state)
+{
+	return yz_host_policy_allow_execmem(cred, state);
 }
 
 int yz_host_policy_restore(const struct yz_file_load_policy *state)

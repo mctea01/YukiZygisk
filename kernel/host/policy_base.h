@@ -40,7 +40,8 @@ int yz_policy_base_get_file_load_keys(
 	bool include_tmpfs, struct yz_policy_file_load_keys *keys,
 	char *src_name, size_t src_name_size, char *tgt_name,
 	size_t tgt_name_size);
-int yz_policy_base_get_execmem_key(struct yz_policy_key *key,
+int yz_policy_base_get_execmem_key(const struct cred *cred,
+				   struct yz_policy_key *key,
 				   u32 *required_av, char *src_name,
 				   size_t src_name_size);
 

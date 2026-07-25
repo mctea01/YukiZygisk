@@ -117,6 +117,12 @@ int yz_host_file_load_policy_allow_execmem_current(
 	return yz_host_policy_allow_execmem_current(state);
 }
 
+int yz_host_file_load_policy_allow_execmem_cred(
+	const struct cred *cred, struct yz_file_load_policy *state)
+{
+	return yz_host_policy_allow_execmem_cred(cred, state);
+}
+
 int yz_host_file_load_policy_restore(const struct yz_file_load_policy *state)
 {
 	return yz_host_policy_restore(state);

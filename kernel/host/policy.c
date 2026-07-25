@@ -189,10 +189,10 @@ yz_policy_sidtab_search(struct sidtab *sidtab, u32 sid)
 	return entry ? &entry->context : NULL;
 }
 
-static u32 yz_policy_current_sid(void)
+static u32 yz_policy_cred_sid(const struct cred *cred)
 {
 	struct task_security_struct *tsec =
-		yz_policy_cred_security(current_cred());
+		yz_policy_cred_security(cred);
 
 	return tsec ? tsec->sid : 0;
 }
@@ -814,7 +814,8 @@ yz_policy_base_get_file_load_keys(
 }
 
 YZ_INDIRECT_CALL int
-yz_policy_base_get_execmem_key(struct yz_policy_key *key, u32 *required_av,
+yz_policy_base_get_execmem_key(const struct cred *cred,
+			       struct yz_policy_key *key, u32 *required_av,
 			       char *src_name, size_t src_name_size)
 {
 	struct selinux_policy *policy;
@@ -829,7 +830,7 @@ yz_policy_base_get_execmem_key(struct yz_policy_key *key, u32 *required_av,
 	*key = (struct yz_policy_key){};
 	*required_av = 0;
 
-	ssid = yz_policy_current_sid();
+	ssid = yz_policy_cred_sid(cred);
 	if (!ssid)
 		return -EINVAL;
 

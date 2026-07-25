@@ -333,7 +333,8 @@ int yz_zygote_probe_allow_module_policy(pid_t tgid, struct file *dir,
 {
 	struct zp_module_policy_holder *holder;
 	struct zp_module_policy_holder *cur;
-	struct yz_file_load_policy state;
+	struct yz_file_load_policy state = {};
+	int restore_ret;
 	int ret;
 
 	if (tgid <= 0 || !dir || !cred)
@@ -347,6 +348,9 @@ int yz_zygote_probe_allow_module_policy(pid_t tgid, struct file *dir,
 	ret = yz_host_file_load_policy_allow_cred(dir, cred, &state);
 	if (ret)
 		goto out_unlock;
+	ret = yz_host_file_load_policy_allow_execmem_cred(cred, &state);
+	if (ret)
+		goto out_restore;
 	if (!zp_native_policy_has_additions(&state))
 		goto out_unlock;
 
@@ -364,10 +368,18 @@ int yz_zygote_probe_allow_module_policy(pid_t tgid, struct file *dir,
 	INIT_DELAYED_WORK(&holder->timeout, zp_module_policy_timeout);
 	list_add_tail(&holder->list, &zp_module_policy_holders);
 	schedule_delayed_work(&holder->timeout, ZP_MODULE_POLICY_TIMEOUT);
-	pr_info("zygote_probe: module policy armed pid=%d src=%u tgt=%u file=0x%x dir=0x%x\n",
+	pr_info("zygote_probe: module policy armed pid=%d src=%u tgt=%u "
+		"file=0x%x dir=0x%x process=0x%x\n",
 		tgid, state.src_type, state.tgt_type, state.added_av,
-		state.dir_added_av);
+		state.dir_added_av, state.process_added_av);
 	holder = NULL;
+	goto out_unlock;
+
+out_restore:
+	restore_ret = yz_host_file_load_policy_restore(&state);
+	if (restore_ret)
+		pr_err("zygote_probe: module policy rollback pid=%d ret=%d\n",
+		       tgid, restore_ret);
 
 out_unlock:
 	mutex_unlock(&zp_module_policy_lock);
@@ -762,7 +774,7 @@ static bool zp_parse_zygote_args(struct mm_struct *mm, char *socket_name,
 #define ZP_EARLY_NATIVE_CORE_DEFAULT "/metadata/yukizygisk/libyukizncore.so"
 #define ZP_EARLY_NATIVE_CORE_LEGACY                                           \
 	"/metadata/watchdog/ksu/yukizygisk/libyukizncore.so"
-#define ZP_VMA_NAME "memfd:data-code-cache"
+#define ZP_VMA_NAME "memfd:"
 #define ZP_VMA_NAME_LEN sizeof(ZP_VMA_NAME)
 #define ZP_LOADER_MAX_SZ (8u << 20) /* sanity cap on a payload image */
 #define ZP_DLEXT_USE_LIBRARY_FD 0x10 /* android_dlextinfo.flags bit */
