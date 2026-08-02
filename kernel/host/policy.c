@@ -91,6 +91,13 @@ static const char *const yz_tmpfs_load_perms[] = {
 	"read", "write", "open", "getattr", "map", "execute",
 };
 
+static const char *const yz_tmpfs_receive_perms[] = {
+	"read",
+	"open",
+	"getattr",
+	"map",
+};
+
 static const char *const yz_process_execmem_perms[] = {
 	"execmem",
 };
@@ -728,10 +735,12 @@ void yz_policy_base_unlock(void)
 YZ_INDIRECT_CALL int
 yz_policy_base_get_file_load_keys(
 	struct file *file, const struct cred *cred, bool include_dir,
-	bool include_tmpfs, struct yz_policy_file_load_keys *keys,
+	enum yz_policy_tmpfs_access tmpfs_access,
+	struct yz_policy_file_load_keys *keys,
 	char *src_name, size_t src_name_size, char *tgt_name,
 	size_t tgt_name_size)
 {
+	const char *const *tmpfs_perms = NULL;
 	struct inode_security_struct *isec;
 	struct task_security_struct *tsec;
 	struct selinux_policy *policy;
@@ -742,9 +751,25 @@ yz_policy_base_get_file_load_keys(
 	u32 ssid;
 	u32 tsid;
 	u32 tmpfs_type;
+	size_t tmpfs_perm_count = 0;
 
 	if (!file || !cred || !keys)
 		return -EINVAL;
+
+	switch (tmpfs_access) {
+	case YZ_POLICY_TMPFS_NONE:
+		break;
+	case YZ_POLICY_TMPFS_LOAD:
+		tmpfs_perms = yz_tmpfs_load_perms;
+		tmpfs_perm_count = ARRAY_SIZE(yz_tmpfs_load_perms);
+		break;
+	case YZ_POLICY_TMPFS_RECEIVE:
+		tmpfs_perms = yz_tmpfs_receive_perms;
+		tmpfs_perm_count = ARRAY_SIZE(yz_tmpfs_receive_perms);
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	*keys = (struct yz_policy_file_load_keys){};
 
@@ -791,7 +816,7 @@ yz_policy_base_get_file_load_keys(
 			cls, yz_dir_load_perms, ARRAY_SIZE(yz_dir_load_perms));
 	}
 
-	tmpfs_type = include_tmpfs ?
+	tmpfs_type = tmpfs_perms ?
 			     yz_policy_type_value_by_name(db, "tmpfs") :
 			     0;
 	if (tmpfs_type) {
@@ -802,8 +827,7 @@ yz_policy_base_get_file_load_keys(
 		keys->tmpfs.tgt_type = tmpfs_type;
 		keys->tmpfs.tclass = (u16)cls->value;
 		keys->tmpfs_required_av = yz_policy_required_av(
-			cls, yz_tmpfs_load_perms,
-			ARRAY_SIZE(yz_tmpfs_load_perms));
+			cls, tmpfs_perms, tmpfs_perm_count);
 	}
 
 	yz_policy_copy_type_name(src_name, src_name_size, db,

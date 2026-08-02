@@ -31,13 +31,20 @@ struct yz_policy_file_load_keys {
 	u32 tmpfs_required_av;
 };
 
+enum yz_policy_tmpfs_access {
+	YZ_POLICY_TMPFS_NONE,
+	YZ_POLICY_TMPFS_LOAD,
+	YZ_POLICY_TMPFS_RECEIVE,
+};
+
 bool yz_policy_base_ready(void);
 int yz_policy_base_lock(void);
 void yz_policy_base_unlock(void);
 
 int yz_policy_base_get_file_load_keys(
 	struct file *file, const struct cred *cred, bool include_dir,
-	bool include_tmpfs, struct yz_policy_file_load_keys *keys,
+	enum yz_policy_tmpfs_access tmpfs_access,
+	struct yz_policy_file_load_keys *keys,
 	char *src_name, size_t src_name_size, char *tgt_name,
 	size_t tgt_name_size);
 int yz_policy_base_get_execmem_key(const struct cred *cred,

@@ -231,7 +231,8 @@ static int yz_policy_temp_plan_allow_locked(const struct yz_policy_key *key,
 
 static int yz_host_policy_allow_file(
 	struct file *file, const struct cred *cred, bool include_dir,
-	bool include_tmpfs, struct yz_file_load_policy *state)
+	enum yz_policy_tmpfs_access tmpfs_access,
+	struct yz_file_load_policy *state)
 {
 	struct yz_policy_file_load_keys keys = {};
 	u32 file_commit_av = 0;
@@ -250,7 +251,7 @@ static int yz_host_policy_allow_file(
 		return ret;
 
 	ret = yz_policy_base_get_file_load_keys(
-		file, cred, include_dir, include_tmpfs, &keys, src_name,
+		file, cred, include_dir, tmpfs_access, &keys, src_name,
 		sizeof(src_name), tgt_name, sizeof(tgt_name));
 	if (ret)
 		goto out_unlock;
@@ -313,14 +314,15 @@ out_unlock:
 int yz_host_policy_allow_file_current(struct file *file,
 				      struct yz_file_load_policy *state)
 {
-	return yz_host_policy_allow_file(file, current_cred(), false, true,
-					 state);
+	return yz_host_policy_allow_file(file, current_cred(), false,
+					 YZ_POLICY_TMPFS_LOAD, state);
 }
 
 int yz_host_policy_allow_file_cred(struct file *file, const struct cred *cred,
 				   struct yz_file_load_policy *state)
 {
-	return yz_host_policy_allow_file(file, cred, true, false, state);
+	return yz_host_policy_allow_file(file, cred, true,
+					 YZ_POLICY_TMPFS_RECEIVE, state);
 }
 
 static int
