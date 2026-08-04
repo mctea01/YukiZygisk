@@ -19,6 +19,8 @@
 
 #define YZ_PRCTL_BOOTSTRAP_OPTION 0x595a0001
 #define YZ_PRCTL_BOOTSTRAP_MAGIC_YUKIHOOK 0x6b6f6f68696b7579ULL
+#define YZ_PRCTL_CONTROL_OPTION 0x595a0002
+#define YZ_PRCTL_CONTROL_MAGIC 0x797a6374
 
 enum yz_event_type {
 	YZ_EV_SPECIALIZE = 1,
@@ -341,6 +343,7 @@ struct yz_runtime_report_cmd {
 #define YZ_IOCTL_GET_RUNTIME                                              \
 	_IOC(_IOC_READ | _IOC_WRITE, YZ_IOCTL_MAGIC, 68, 0)
 #define YZ_IOCTL_REPORT_RUNTIME _IOC(_IOC_WRITE, YZ_IOCTL_MAGIC, 69, 0)
+#define YZ_IOCTL_DAEMON_READY _IOC(_IOC_NONE, YZ_IOCTL_MAGIC, 70, 0)
 
 struct yz_config {
 	__u8 yukilinker;

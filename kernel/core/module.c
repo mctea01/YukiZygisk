@@ -192,8 +192,14 @@ static void __exit yukizygisk_exit(void)
 {
 	pr_info("yukizygisk: standalone LKM exiting\n");
 
+	/*
+	 * The guard enters fail-close through yz_lifecycle_lock. Cancel it before
+	 * taking that lock so module exit cannot wait on a worker waiting on us.
+	 */
+	yukizygisk_bootstrap_exit();
 	mutex_lock(&yz_lifecycle_lock);
-	yukizygisk_deactivate_locked(false);
+	yz_stage_bootstrap_active = false;
+	yukizygisk_deactivate_locked(true);
 	mutex_unlock(&yz_lifecycle_lock);
 }
 

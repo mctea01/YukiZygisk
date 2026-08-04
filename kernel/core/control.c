@@ -10,6 +10,7 @@
 
 #include <linux/cred.h>
 #include <linux/anon_inodes.h>
+#include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/fdtable.h>
 #include <linux/fs.h>
@@ -18,6 +19,7 @@
 #include <linux/mm.h>
 #include <linux/pid.h>
 #include <linux/printk.h>
+#include <linux/rwsem.h>
 #include <linux/ptrace.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
@@ -25,6 +27,7 @@
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
+#include "core/bootstrap.h"
 #include "core/control.h"
 #include "feature/zygote_ctl.h"
 #include "feature/zygote_nl.h"
@@ -32,6 +35,13 @@
 #include "host/host.h"
 #include "host/runtime.h"
 #include "uapi/yukizygisk.h"
+
+static atomic_t yz_control_available = ATOMIC_INIT(0);
+static DECLARE_RWSEM(yz_control_sem);
+
+struct yz_control_file {
+	bool bootstrap;
+};
 
 #define YZ_PER_USER_RANGE 100000
 
@@ -451,12 +461,11 @@ static int yz_ioctl_patch_text(void __user *arg)
 	return 0;
 }
 
-static long yukizygisk_ioctl(struct file *file, unsigned int request,
-			     unsigned long arg)
+static long yukizygisk_ioctl_dispatch(struct file *file,
+				      unsigned int request, unsigned long arg)
 {
+	struct yz_control_file *control = file->private_data;
 	void __user *uarg = (void __user *)arg;
-
-	(void)file;
 
 	switch (request) {
 	case YZ_IOCTL_HANDOFF:
@@ -500,15 +509,34 @@ static long yukizygisk_ioctl(struct file *file, unsigned int request,
 		return yz_ioctl_get_runtime(uarg);
 	case YZ_IOCTL_REPORT_RUNTIME:
 		return yz_ioctl_report_runtime(uarg);
+	case YZ_IOCTL_DAEMON_READY:
+		if (!control || !control->bootstrap)
+			return -EPERM;
+		return yukizygisk_bootstrap_daemon_ready();
 	default:
 		return -ENOTTY;
 	}
 }
 
+static long yukizygisk_ioctl(struct file *file, unsigned int request,
+			     unsigned long arg)
+{
+	long ret;
+
+	down_read(&yz_control_sem);
+	ret = atomic_read(&yz_control_available) ?
+		      yukizygisk_ioctl_dispatch(file, request, arg) :
+		      -ENODEV;
+	up_read(&yz_control_sem);
+	return ret;
+}
+
 static int yukizygisk_release(struct inode *inode, struct file *file)
 {
+	struct yz_control_file *control = file->private_data;
+
 	(void)inode;
-	(void)file;
+	kfree(control);
 	module_put(THIS_MODULE);
 	return 0;
 }
@@ -524,37 +552,57 @@ static const struct file_operations yukizygisk_fops = {
 
 int yukizygisk_control_init(void)
 {
+	down_write(&yz_control_sem);
+	atomic_set(&yz_control_available, 1);
+	up_write(&yz_control_sem);
 	pr_info("yukizygisk: anonymous control fd backend ready\n");
 	return 0;
 }
 
 void yukizygisk_control_exit(void)
 {
+	down_write(&yz_control_sem);
+	atomic_set(&yz_control_available, 0);
+	up_write(&yz_control_sem);
 }
 
-int yukizygisk_control_install_fd(void)
+bool yukizygisk_control_available(void)
 {
+	return atomic_read(&yz_control_available) != 0;
+}
+
+int yukizygisk_control_install_fd(bool bootstrap)
+{
+	struct yz_control_file *control;
 	struct file *file;
 	int fd;
 
+	if (!yukizygisk_control_available())
+		return -ENODEV;
+	control = kzalloc(sizeof(*control), GFP_KERNEL);
+	if (!control)
+		return -ENOMEM;
+	control->bootstrap = bootstrap;
 	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0)
+	if (fd < 0) {
+		kfree(control);
 		return fd;
+	}
 	if (!try_module_get(THIS_MODULE)) {
 		put_unused_fd(fd);
+		kfree(control);
 		return -ENODEV;
 	}
 
-	file = anon_inode_getfile("ctl", &yukizygisk_fops, NULL,
+	file = anon_inode_getfile("ctl", &yukizygisk_fops, control,
 				  O_RDWR | O_CLOEXEC);
 	if (IS_ERR(file)) {
 		module_put(THIS_MODULE);
 		put_unused_fd(fd);
+		kfree(control);
 		return PTR_ERR(file);
 	}
 
 	fd_install(fd, file);
-	pr_info("yukizygisk: anonymous control fd installed pid=%d fd=%d\n",
-		current->pid, fd);
 	return fd;
 }

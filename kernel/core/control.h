@@ -10,8 +10,9 @@
 #ifndef _YUKIZYGISK_CONTROL_H
 #define _YUKIZYGISK_CONTROL_H
 
+bool yukizygisk_control_available(void);
 int yukizygisk_control_init(void);
 void yukizygisk_control_exit(void);
-int yukizygisk_control_install_fd(void);
+int yukizygisk_control_install_fd(bool bootstrap);
 
 #endif /* _YUKIZYGISK_CONTROL_H */

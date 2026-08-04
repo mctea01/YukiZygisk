@@ -12,5 +12,6 @@
 
 int yukizygisk_bootstrap_init(void);
 void yukizygisk_bootstrap_exit(void);
+int yukizygisk_bootstrap_daemon_ready(void);
 
 #endif /* _YUKIZYGISK_BOOTSTRAP_H */
