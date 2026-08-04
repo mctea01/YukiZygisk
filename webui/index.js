@@ -252,7 +252,10 @@ function renderStatus() {
 
     <section class="panel span-2">
       ${sectionHeader(t("status.zygoteMonitor"), t("status.zygoteMonitorDesc"))}
-      <div class="data-list">${zygotes.length ? zygotes.map((item) => `<div class="data-row"><div class="identity"><strong>${escapeHtml(item.name)}</strong><span>PID ${escapeHtml(item.pid)}</span></div><code>${escapeHtml(item.abi)}</code>${stateBadge(item.state)}</div>`).join("") : emptyState(t("common.none"))}</div>
+      <div class="data-list">${zygotes.length ? zygotes.map((item) => {
+        const process = item.process && item.process !== item.name ? `${escapeHtml(item.process)} · ` : "";
+        return `<div class="data-row"><div class="identity"><strong>${escapeHtml(item.name)}</strong><span>${process}PID ${escapeHtml(item.pid)}</span></div><code>${escapeHtml(item.abi)}</code>${stateBadge(item.state)}</div>`;
+      }).join("") : emptyState(t("common.none"))}</div>
     </section>
 
     <section class="panel span-2">
