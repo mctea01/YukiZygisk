@@ -23,9 +23,11 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/system_properties.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
@@ -41,7 +43,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <fstream>
 #include <limits.h>
 #include <sstream>
@@ -112,14 +113,11 @@ std::string g_modules_dir = kDefaultModulesDir;
 std::string g_config_path = kDefaultConfigPath;
 uint64_t g_cookie_lo = 0;
 uint64_t g_cookie_hi = 0;
-int g_manager_uid = -1;
 int g_control_fd = -1;
 
 const std::string &modules_dir() { return g_modules_dir; }
 
 const std::string &config_path() { return g_config_path; }
-
-int manager_uid() { return g_manager_uid; }
 
 bool parse_u64(const char *s, uint64_t *out) {
   if (s == nullptr || *s == '\0')
@@ -145,23 +143,6 @@ bool parse_i32(const char *s, int *out) {
   return true;
 }
 
-bool option_value(int argc, char **argv, int *index, const char *name,
-                  std::string *out) {
-  const char *arg = argv[*index];
-  size_t name_len = strlen(name);
-  if (strcmp(arg, name) == 0) {
-    if (*index + 1 >= argc)
-      return false;
-    *out = argv[++(*index)];
-    return true;
-  }
-  if (strncmp(arg, name, name_len) == 0 && arg[name_len] == '=') {
-    *out = arg + name_len + 1;
-    return true;
-  }
-  return false;
-}
-
 void load_env() {
   const char *env = getenv("YUKIZYGISK_CONTROL_FD");
   if (env != nullptr && *env != '\0') {
@@ -179,10 +160,6 @@ void load_env() {
   if (env != nullptr && *env != '\0')
     g_config_path = env;
 
-  env = getenv("YUKIZYGISK_MANAGER_UID");
-  if (env != nullptr && *env != '\0')
-    parse_i32(env, &g_manager_uid);
-
   env = getenv("YUKIZYGISK_BOOTSTRAP_COOKIE");
   if (env != nullptr && *env != '\0')
     parse_u64(env, &g_cookie_lo);
@@ -194,45 +171,6 @@ void load_env() {
   env = getenv("YUKIZYGISK_BOOTSTRAP_COOKIE_HI");
   if (env != nullptr && *env != '\0')
     parse_u64(env, &g_cookie_hi);
-}
-
-bool parse_options(int argc, char **argv) {
-  load_env();
-  for (int i = 1; i < argc; ++i) {
-    std::string value;
-    if (option_value(argc, argv, &i, "--modules-dir", &value)) {
-      if (!value.empty())
-        g_modules_dir = value;
-    } else if (option_value(argc, argv, &i, "--config", &value)) {
-      if (!value.empty())
-        g_config_path = value;
-    } else if (option_value(argc, argv, &i, "--manager-uid", &value)) {
-      if (!parse_i32(value.c_str(), &g_manager_uid)) {
-        DLOGE("invalid --manager-uid=%s", value.c_str());
-        return false;
-      }
-    } else if (option_value(argc, argv, &i, "--bootstrap-cookie", &value) ||
-               option_value(argc, argv, &i, "--bootstrap-cookie-lo", &value)) {
-      if (!parse_u64(value.c_str(), &g_cookie_lo)) {
-        DLOGE("invalid bootstrap cookie low word: %s", value.c_str());
-        return false;
-      }
-    } else if (option_value(argc, argv, &i, "--bootstrap-cookie-hi", &value)) {
-      if (!parse_u64(value.c_str(), &g_cookie_hi)) {
-        DLOGE("invalid bootstrap cookie high word: %s", value.c_str());
-        return false;
-      }
-    } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-      DLOGI("usage: zygiskd [--bootstrap-cookie-lo N] "
-            "[--bootstrap-cookie-hi N] [--modules-dir DIR] [--config FILE] "
-            "[--manager-uid UID]; zygiskd --check-status|--status|--reload");
-      return false;
-    } else {
-      DLOGE("unknown option: %s", argv[i]);
-      return false;
-    }
-  }
-  return true;
 }
 
 int claim_control_fd() {
@@ -275,11 +213,6 @@ int ctl(int request, void *arg) {
     return -1;
   }
   return ioctl(g_control_fd, request, arg);
-}
-
-bool control_fd_works() {
-  yz_safemode_status_cmd cmd{};
-  return ctl(YZ_IOCTL_GET_SAFEMODE, &cmd) == 0;
 }
 
 bool get_root_status(yz_root_status_cmd *status) {
@@ -327,14 +260,6 @@ using NativeModule = yukizygisk::native::NativeModule;
 std::vector<NativeModule> g_native_modules;
 std::vector<NativeModule> g_native_targets;
 
-struct SafemodeStatus {
-  bool active = false;
-  uint32_t zygote_crashes = 0;
-  std::string zygote;
-};
-
-SafemodeStatus g_safemode;
-
 int consume_ready_fd() {
   const char *env = getenv("YUKIZYGISK_READY_FD");
   if (env == nullptr || *env == '\0')
@@ -353,62 +278,85 @@ void notify_ready(int fd, bool ok) {
   if (fd < 0)
     return;
   const char byte = ok ? '1' : '0';
-  ssize_t w = write(fd, &byte, 1);
+  ssize_t w;
+  do {
+    w = write(fd, &byte, 1);
+  } while (w < 0 && errno == EINTR);
   (void)w;
   close(fd);
 }
 
 #if defined(__LP64__)
-bool spawn_compat_daemon() {
+void stop_compat_daemon(pid_t pid) {
+  if (pid <= 0)
+    return;
+  (void)kill(pid, SIGKILL);
+  while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {
+  }
+}
+
+pid_t spawn_compat_daemon() {
   char exe_path[PATH_MAX];
   ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
   if (exe_len <= 0)
-    return false;
+    return -1;
   exe_path[exe_len] = '\0';
   char *leaf = strrchr(exe_path, '/');
   if (leaf == nullptr ||
       static_cast<size_t>(leaf - exe_path) + sizeof("/zygiskd32") >
           sizeof(exe_path))
-    return false;
+    return -1;
   memcpy(leaf, "/zygiskd32", sizeof("/zygiskd32"));
 
   int ready[2];
   if (pipe2(ready, O_CLOEXEC) != 0)
-    return false;
+    return -1;
   pid_t pid = fork();
   if (pid == 0) {
     close(ready[0]);
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() == 1)
+      _exit(127);
     int control_fd = fcntl(yzhost::g_control_fd, F_DUPFD, 3);
     if (control_fd < 0 || fcntl(control_fd, F_SETFD, 0) != 0 ||
         fcntl(ready[1], F_SETFD, 0) != 0)
       _exit(127);
     char control_text[16];
     char ready_text[16];
-    char manager_text[16];
     snprintf(control_text, sizeof(control_text), "%d", control_fd);
     snprintf(ready_text, sizeof(ready_text), "%d", ready[1]);
-    snprintf(manager_text, sizeof(manager_text), "%d", yzhost::manager_uid());
     setenv("YUKIZYGISK_CONTROL_FD", control_text, 1);
     setenv("YUKIZYGISK_READY_FD", ready_text, 1);
     setenv("YUKIZYGISK_MODULES_DIR", yzhost::modules_dir().c_str(), 1);
     setenv("YUKIZYGISK_CONFIG", yzhost::config_path().c_str(), 1);
-    setenv("YUKIZYGISK_MANAGER_UID", manager_text, 1);
     execl(exe_path, exe_path, static_cast<char *>(nullptr));
     _exit(127);
   }
   close(ready[1]);
   if (pid < 0) {
     close(ready[0]);
-    return false;
+    return -1;
   }
 
   pollfd pfd{ready[0], POLLIN, 0};
   char result = '0';
-  bool ok = poll(&pfd, 1, 5000) > 0 && read(ready[0], &result, 1) == 1 &&
-            result == '1';
+  int poll_result;
+  do {
+    poll_result = poll(&pfd, 1, 5000);
+  } while (poll_result < 0 && errno == EINTR);
+  ssize_t received = -1;
+  if (poll_result > 0 && (pfd.revents & POLLIN)) {
+    do {
+      received = read(ready[0], &result, 1);
+    } while (received < 0 && errno == EINTR);
+  }
+  bool ok = received == 1 && result == '1';
   close(ready[0]);
+  if (!ok) {
+    stop_compat_daemon(pid);
+    pid = -1;
+  }
   DLOGI("zygiskd32 spawn pid=%d ready=%u", pid, ok ? 1U : 0U);
-  return ok;
+  return pid;
 }
 #endif // #if defined(__LP64__)
 
@@ -423,7 +371,8 @@ std::vector<Module> scan_modules() {
     if (e->d_name[0] == '.')
       continue;
     std::string base = yzhost::modules_dir() + "/" + e->d_name;
-    if (access((base + "/disable").c_str(), F_OK) == 0)
+    if (access((base + "/disable").c_str(), F_OK) == 0 ||
+        access((base + "/remove").c_str(), F_OK) == 0)
       continue;
     std::string lib = base + "/zygisk/" + kAbi + ".so";
     if (access(lib.c_str(), F_OK) != 0)
@@ -445,7 +394,8 @@ std::vector<NativeModule> scan_native_modules() {
       continue;
     std::string module_id = e->d_name;
     std::string base = yzhost::modules_dir() + "/" + module_id;
-    if (access((base + "/disable").c_str(), F_OK) == 0)
+    if (access((base + "/disable").c_str(), F_OK) == 0 ||
+        access((base + "/remove").c_str(), F_OK) == 0)
       continue;
 
     std::ifstream f(base + "/zn_modules.txt");
@@ -487,6 +437,22 @@ int native_module_elf_class(const std::string &path) {
   return ident[EI_CLASS];
 }
 
+#if defined(__LP64__)
+bool needs_compat_daemon() {
+  char zygote[PROP_VALUE_MAX]{};
+  if (__system_property_get("ro.zygote", zygote) > 0 &&
+      strstr(zygote, "32") != nullptr)
+    return true;
+
+  return std::any_of(g_native_targets.begin(), g_native_targets.end(),
+                     [](const NativeModule &module) {
+                       return native_module_elf_class(module.lib_path) ==
+                              ELFCLASS32;
+                     });
+}
+#endif // #if defined(__LP64__)
+
+#if defined(__LP64__)
 void publish_native_targets() {
   yz_native_targets_cmd cmd{};
   for (const auto &m : g_native_targets) {
@@ -514,6 +480,7 @@ void publish_native_targets() {
           cmd.count, ret, errno, strerror(errno));
   }
 }
+#endif // #if defined(__LP64__)
 
 void rescan_modules() {
   g_modules = scan_modules();
@@ -558,104 +525,6 @@ bool write_exact(int fd, const void *buf, size_t n) {
     n -= static_cast<size_t>(r);
   }
   return true;
-}
-
-int connect_daemon_socket() {
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (fd < 0)
-    return -1;
-
-  sockaddr_un addr{};
-  addr.sun_family = AF_UNIX;
-  const size_t name_len = strlen(zygiskd::kSocketName);
-  memcpy(addr.sun_path + 1, zygiskd::kSocketName, name_len);
-  socklen_t len =
-      static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + name_len);
-
-  if (connect(fd, reinterpret_cast<sockaddr *>(&addr), len) != 0) {
-    close(fd);
-    return -1;
-  }
-  return fd;
-}
-
-bool request_check_status() {
-  int sock = connect_daemon_socket();
-  if (sock < 0)
-    return false;
-
-  uint8_t op = static_cast<uint8_t>(zygiskd::Request::CheckStatus);
-  uint8_t ok = 0;
-  bool ret = write_exact(sock, &op, sizeof(op)) &&
-             read_exact(sock, &ok, sizeof(ok)) && ok != 0;
-  close(sock);
-  return ret;
-}
-
-bool request_status_json(std::string *out) {
-  if (out == nullptr)
-    return false;
-
-  int sock = connect_daemon_socket();
-  if (sock < 0)
-    return false;
-
-  uint8_t op = static_cast<uint8_t>(zygiskd::Request::GetStatus);
-  uint32_t len = 0;
-  bool ok = write_exact(sock, &op, sizeof(op)) &&
-            read_exact(sock, &len, sizeof(len)) && len > 0 &&
-            len <= 1024 * 1024;
-  if (ok) {
-    out->assign(len, '\0');
-    ok = read_exact(sock, out->data(), len);
-  }
-  close(sock);
-  return ok;
-}
-
-bool request_reload() {
-  int sock = connect_daemon_socket();
-  if (sock < 0)
-    return false;
-
-  uint8_t op = static_cast<uint8_t>(zygiskd::Request::Reload);
-  uint8_t ok = 0;
-  bool ret = write_exact(sock, &op, sizeof(op)) &&
-             read_exact(sock, &ok, sizeof(ok)) && ok != 0;
-  close(sock);
-  return ret;
-}
-
-int run_status_client(bool print_json) {
-  signal(SIGPIPE, SIG_IGN);
-
-  if (print_json) {
-    std::string js;
-    if (!request_status_json(&js)) {
-      fprintf(stderr, "zygiskd: status unavailable\n");
-      return 1;
-    }
-    if (!js.empty()) {
-      write(STDOUT_FILENO, js.data(), js.size());
-      write(STDOUT_FILENO, "\n", 1);
-    }
-    return 0;
-  }
-
-  if (!request_check_status()) {
-    fprintf(stderr, "zygiskd: status check failed\n");
-    return 1;
-  }
-  return 0;
-}
-
-int run_reload_client() {
-  signal(SIGPIPE, SIG_IGN);
-  if (!request_reload()) {
-    fprintf(stderr, "zygiskd: reload failed\n");
-    return 1;
-  }
-  return 0;
 }
 
 /* Send one fd via SCM_RIGHTS. */
@@ -1127,48 +996,6 @@ void read_yzconfig() {
         cfg.denylist_mode, cfg.dmesg_log);
 }
 
-void refresh_safemode_status() {
-  yz_safemode_status_cmd cmd{};
-  if (yzhost::ctl(YZ_IOCTL_GET_SAFEMODE, &cmd) != 0)
-    return;
-
-  cmd.zygote[sizeof(cmd.zygote) - 1] = '\0';
-  g_safemode.active = cmd.active != 0;
-  g_safemode.zygote_crashes = cmd.zygote_crashes;
-  g_safemode.zygote = cmd.zygote;
-}
-
-void note_safemode_event(uint32_t pid, uint32_t crashes) {
-  refresh_safemode_status();
-  if (!g_safemode.active) {
-    g_safemode.active = true;
-    g_safemode.zygote_crashes = crashes;
-  }
-  DLOGI("safemode: zygote crash threshold reached pid=%u crashes=%u name=%s",
-        pid, g_safemode.zygote_crashes,
-        g_safemode.zygote.empty() ? "zygote" : g_safemode.zygote.c_str());
-}
-
-uint64_t g_inject_count = 0;
-std::deque<uint32_t> g_recent_appids;
-constexpr size_t kRecentMax = 16;
-
-void record_injection(uint32_t appid) {
-  ++g_inject_count;
-  for (auto it = g_recent_appids.begin(); it != g_recent_appids.end(); ++it)
-    if (*it == appid) {
-      g_recent_appids.erase(it); // move-to-front: keep the list distinct
-      break;
-    }
-  g_recent_appids.push_front(appid);
-  if (g_recent_appids.size() > kRecentMax)
-    g_recent_appids.pop_back();
-}
-
-const char *native_target_type_name(uint8_t type) {
-  return type == YZ_NATIVE_TARGET_PATH ? "path" : "name";
-}
-
 #if defined(__LP64__)
 constexpr uint8_t kRuntimeAbi = YZ_RUNTIME_ABI_64;
 #else
@@ -1176,54 +1003,8 @@ constexpr uint8_t kRuntimeAbi = YZ_RUNTIME_ABI_32;
 #endif
 
 struct RuntimeSnapshot {
-  bool available = false;
-  bool safe_mode = false;
-  uint32_t zygote_crashes = 0;
-  std::string safe_mode_zygote;
   std::vector<yz_runtime_record> records;
 };
-
-struct NativeInjectionView {
-  uint32_t pid;
-  std::string process;
-  std::string module_id;
-  std::string target_type;
-  std::string target;
-  std::string abi;
-  std::string state;
-  bool has_companion;
-};
-
-template <size_t N> std::string runtime_string(const char (&value)[N]) {
-  return std::string(value, strnlen(value, N));
-}
-
-const char *runtime_abi_name(uint8_t abi) {
-  switch (abi) {
-  case YZ_RUNTIME_ABI_32:
-    return "armeabi-v7a";
-  case YZ_RUNTIME_ABI_64:
-    return "arm64-v8a";
-  default:
-    return "unknown";
-  }
-}
-
-const char *runtime_state_name(uint8_t state) {
-  switch (state) {
-  case YZ_RUNTIME_STATE_INJECTED:
-    return "injected";
-  case YZ_RUNTIME_STATE_SAFEMODE:
-    return "crashed";
-  case YZ_RUNTIME_STATE_EXITED:
-    return nullptr;
-  case YZ_RUNTIME_STATE_DETECTED:
-  case YZ_RUNTIME_STATE_REDIRECTED:
-  case YZ_RUNTIME_STATE_FAILED:
-  default:
-    return "failed";
-  }
-}
 
 RuntimeSnapshot query_runtime_snapshot() {
   RuntimeSnapshot snapshot;
@@ -1240,11 +1021,6 @@ RuntimeSnapshot query_runtime_snapshot() {
 
   if (cmd.count < snapshot.records.size())
     snapshot.records.resize(cmd.count);
-  snapshot.available = true;
-  snapshot.safe_mode = cmd.safe_mode != 0;
-  snapshot.zygote_crashes = cmd.zygote_crashes;
-  cmd.safe_mode_zygote[sizeof(cmd.safe_mode_zygote) - 1] = '\0';
-  snapshot.safe_mode_zygote = cmd.safe_mode_zygote;
   return snapshot;
 }
 
@@ -1279,292 +1055,6 @@ uint32_t runtime_generation(pid_t pid, uint8_t kind) {
   }
   return generation;
 }
-
-const yz_runtime_record *find_native_ready(const RuntimeSnapshot &snapshot,
-                                           uint32_t pid, uint32_t generation,
-                                           const std::string &module_id) {
-  for (const auto &record : snapshot.records) {
-    if (record.kind != YZ_RUNTIME_KIND_NATIVE || record.abi != kRuntimeAbi ||
-        record.pid != pid || record.generation != generation ||
-        runtime_string(record.module_id) != module_id ||
-        record.state == YZ_RUNTIME_STATE_EXITED)
-      continue;
-    return &record;
-  }
-  return nullptr;
-}
-
-std::vector<NativeInjectionView>
-build_native_injection_views(const RuntimeSnapshot &snapshot) {
-  std::vector<NativeInjectionView> views;
-  for (const auto &base : snapshot.records) {
-    if (base.kind != YZ_RUNTIME_KIND_NATIVE || base.abi != kRuntimeAbi ||
-        base.state == YZ_RUNTIME_STATE_EXITED || base.module_id[0] != '\0')
-      continue;
-
-    const std::string target = runtime_string(base.target);
-    for (const auto &module : g_native_modules) {
-      if (module.target_type != base.target_type || module.target != target)
-        continue;
-
-      const yz_runtime_record *ready = find_native_ready(
-          snapshot, base.pid, base.generation, module.module_id);
-      const char *state = ready != nullptr ? runtime_state_name(ready->state)
-                          : base.state == YZ_RUNTIME_STATE_SAFEMODE ? "crashed"
-                                                                    : "failed";
-      if (state == nullptr)
-        continue;
-      views.push_back(NativeInjectionView{
-          base.pid,
-          runtime_string(base.process),
-          module.module_id,
-          native_target_type_name(base.target_type),
-          target,
-          runtime_abi_name(base.abi),
-          state,
-          module.has_companion,
-      });
-    }
-  }
-  return views;
-}
-
-const char *native_module_state(const std::string &module_id,
-                                const std::vector<NativeInjectionView> &views) {
-  bool injected = false;
-  bool failed = false;
-  for (const auto &view : views) {
-    if (view.module_id != module_id)
-      continue;
-    if (view.state == "crashed")
-      return "crashed";
-    if (view.state == "failed")
-      failed = true;
-    else if (view.state == "injected")
-      injected = true;
-  }
-  if (failed)
-    return "failed";
-  return injected ? "injected" : "failed";
-}
-
-void json_append_escaped(std::string &out, const std::string &s) {
-  for (char c : s) {
-    switch (c) {
-    case '"':
-      out += "\\\"";
-      break;
-    case '\\':
-      out += "\\\\";
-      break;
-    case '\n':
-      out += "\\n";
-      break;
-    case '\r':
-      out += "\\r";
-      break;
-    case '\t':
-      out += "\\t";
-      break;
-    default:
-      if (static_cast<unsigned char>(c) < 0x20) {
-        char b[8];
-        snprintf(b, sizeof(b), "\\u%04x", static_cast<unsigned char>(c));
-        out += b;
-      } else {
-        out += c;
-      }
-    }
-  }
-}
-
-bool peer_can_query_status(int client, struct ucred *cred) {
-  struct ucred local{};
-  socklen_t len = sizeof(local);
-  if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &local, &len) != 0)
-    return false;
-  if (cred != nullptr)
-    *cred = local;
-
-  int mgr = yzhost::manager_uid();
-  return static_cast<int>(local.uid) == 0 ||
-         (mgr > 0 && static_cast<int>(local.uid) == mgr);
-}
-
-/* Compact status JSON for the manager and root-side health checks. */
-std::string build_status_json() {
-  const RuntimeSnapshot runtime = query_runtime_snapshot();
-  bool kernel_alive = runtime.available;
-  yz_root_status_cmd root_status{};
-  bool root_status_ok = yzhost::get_root_status(&root_status);
-  const std::vector<NativeInjectionView> native_injections =
-      build_native_injection_views(runtime);
-
-  std::string s = "{\"kernel_alive\":";
-  s += kernel_alive ? "true" : "false";
-  s += ",\"daemon_pid\":";
-  s += std::to_string(getpid());
-  s += ",\"abi\":\"";
-  json_append_escaped(s, kAbi);
-  s += "\"";
-  s += ",\"root_impl\":\"";
-  if (!root_status_ok)
-    s += "unknown";
-  else if (root_status.owner == YZ_ROOT_OWNER_UAPI_KERNELSU)
-    s += (root_status.flags & YZ_ROOT_STATUS_KSU_REDIRECT) != 0
-             ? "kernelsu-redirect"
-             : "kernelsu";
-  else if (root_status.owner == YZ_ROOT_OWNER_UAPI_KERNELPATCH)
-    s += "kernelpatch";
-  else
-    s += "unsupported";
-  s += "\"";
-  s += ",\"root_mask\":";
-  s += std::to_string(root_status.mask);
-  s += ",\"ksu_redirect\":";
-  s +=
-      (root_status_ok && (root_status.flags & YZ_ROOT_STATUS_KSU_REDIRECT) != 0)
-          ? "true"
-          : "false";
-  s += ",\"root_policy_source\":\"";
-  json_append_escaped(s, yzpolicy::source_name());
-  s += "\"";
-  s += ",\"root_policy_cache_ready\":";
-  s += (root_status_ok &&
-        (root_status.flags & YZ_ROOT_STATUS_POLICY_CACHE_READY) != 0)
-           ? "true"
-           : "false";
-  s += ",\"count\":";
-  s += std::to_string(g_inject_count);
-  s += ",\"safe_mode\":";
-  s += runtime.safe_mode ? "true" : "false";
-  s += ",\"zygote_crashes\":";
-  s += std::to_string(runtime.zygote_crashes);
-  s += ",\"safe_mode_zygote\":\"";
-  json_append_escaped(s, runtime.safe_mode_zygote.empty()
-                             ? "zygote"
-                             : runtime.safe_mode_zygote);
-  s += "\"";
-  s += ",\"yukilinker\":";
-  s += g_yz_config.yukilinker ? "true" : "false";
-  s += ",\"denylist_mode\":";
-  s += std::to_string(g_yz_config.denylist_mode);
-  s += ",\"dmesg_log\":";
-  s += g_yz_config.dmesg_log ? "true" : "false";
-  s += ",\"recent\":[";
-  bool first = true;
-  for (uint32_t a : g_recent_appids) {
-    if (!first)
-      s += ',';
-    first = false;
-    s += std::to_string(a);
-  }
-  s += "],\"zygotes\":[";
-  first = true;
-  for (const auto &record : runtime.records) {
-    if (record.kind != YZ_RUNTIME_KIND_ZYGOTE || record.abi != kRuntimeAbi ||
-        record.state != YZ_RUNTIME_STATE_INJECTED)
-      continue;
-    const std::string target = runtime_string(record.target);
-    if (!first)
-      s += ',';
-    first = false;
-    s += "{\"pid\":";
-    s += std::to_string(record.pid);
-    s += ",\"name\":\"";
-    json_append_escaped(s, target);
-    s += "\",\"target\":\"";
-    json_append_escaped(s, target);
-    s += "\",\"process\":\"";
-    json_append_escaped(s, runtime_string(record.process));
-    s += "\",\"abi\":\"";
-    json_append_escaped(s, runtime_abi_name(record.abi));
-    s += "\"}";
-  }
-  s += "],\"zygote_monitor\":[";
-  first = true;
-  for (const auto &record : runtime.records) {
-    if (record.kind != YZ_RUNTIME_KIND_ZYGOTE || record.abi != kRuntimeAbi)
-      continue;
-    const char *state = runtime_state_name(record.state);
-    if (state == nullptr)
-      continue;
-    const std::string target = runtime_string(record.target);
-    if (!first)
-      s += ',';
-    first = false;
-    s += "{\"pid\":";
-    s += std::to_string(record.pid);
-    s += ",\"name\":\"";
-    json_append_escaped(s, target);
-    s += "\",\"target\":\"";
-    json_append_escaped(s, target);
-    s += "\",\"process\":\"";
-    json_append_escaped(s, runtime_string(record.process));
-    s += "\",\"abi\":\"";
-    json_append_escaped(s, runtime_abi_name(record.abi));
-    s += "\",\"state\":\"";
-    json_append_escaped(s, state);
-    s += "\"}";
-  }
-  s += "],\"modules\":[";
-  first = true;
-  for (const auto &m : g_modules) {
-    if (!first)
-      s += ',';
-    first = false;
-    s += '"';
-    json_append_escaped(s, m.name);
-    s += '"';
-  }
-  s += "],\"native_modules\":[";
-  first = true;
-  for (const auto &m : g_native_modules) {
-    if (!first)
-      s += ',';
-    first = false;
-    s += "{\"id\":\"";
-    json_append_escaped(s, m.module_id);
-    s += "\",\"target_type\":\"";
-    json_append_escaped(s, native_target_type_name(m.target_type));
-    s += "\",\"target\":\"";
-    json_append_escaped(s, m.target);
-    s += "\",\"companion\":";
-    s += m.has_companion ? "true" : "false";
-    s += ",\"state\":\"";
-    s += native_module_state(m.module_id, native_injections);
-    s += "\"";
-    s += "}";
-  }
-  s += "],\"native_injections\":[";
-  first = true;
-  for (const auto &n : native_injections) {
-    if (!first)
-      s += ',';
-    first = false;
-    s += "{\"pid\":";
-    s += std::to_string(n.pid);
-    s += ",\"process\":\"";
-    json_append_escaped(s, n.process);
-    s += "\",\"module\":\"";
-    json_append_escaped(s, n.module_id);
-    s += "\",\"target_type\":\"";
-    json_append_escaped(s, n.target_type);
-    s += "\",\"target\":\"";
-    json_append_escaped(s, n.target);
-    s += "\",\"abi\":\"";
-    json_append_escaped(s, n.abi);
-    s += "\",\"companion\":";
-    s += n.has_companion ? "true" : "false";
-    s += ",\"state\":\"";
-    json_append_escaped(s, n.state);
-    s += "\"";
-    s += "}";
-  }
-  s += "]}";
-  return s;
-}
-
 void handle_client(int client) {
   uint8_t op = 0;
   if (!read_exact(client, &op, sizeof(op)))
@@ -1663,48 +1153,6 @@ void handle_client(int client) {
   }
   case zygiskd::Request::GetConfig: {
     write_exact(client, &g_yz_config, sizeof(g_yz_config));
-    break;
-  }
-  case zygiskd::Request::GetStatus: {
-    // Manager-only telemetry.
-    std::string js;
-    struct ucred cr{};
-    if (peer_can_query_status(client, &cr)) {
-      js = build_status_json();
-    } else {
-      DLOGI("GetStatus denied: peer uid=%d manager uid=%d",
-            static_cast<int>(cr.uid), yzhost::manager_uid());
-    }
-    uint32_t n = static_cast<uint32_t>(js.size());
-    write_exact(client, &n, sizeof(n));
-    if (n != 0)
-      write_exact(client, js.data(), n);
-    break;
-  }
-  case zygiskd::Request::CheckStatus: {
-    struct ucred cr{};
-    uint8_t ok = 0;
-    if (peer_can_query_status(client, &cr))
-      ok = yzhost::control_fd_works() ? 1 : 0;
-    else
-      DLOGI("CheckStatus denied: peer uid=%d manager uid=%d",
-            static_cast<int>(cr.uid), yzhost::manager_uid());
-    write_exact(client, &ok, sizeof(ok));
-    break;
-  }
-  case zygiskd::Request::Reload: {
-    struct ucred cr{};
-    uint8_t ok = 0;
-    if (peer_can_query_status(client, &cr)) {
-      read_yzconfig();
-      rescan_modules();
-      (void)yzpolicy::refresh(true);
-      ok = 1;
-    } else {
-      DLOGI("Reload denied: peer uid=%d manager uid=%d",
-            static_cast<int>(cr.uid), yzhost::manager_uid());
-    }
-    write_exact(client, &ok, sizeof(ok));
     break;
   }
   case zygiskd::Request::RevertMount: {
@@ -1945,37 +1393,36 @@ int nl_listen() {
   return fd;
 }
 
-void on_specialize(uint32_t /*pid*/, uint32_t /*appid*/) {}
-
 void nl_drain(int fd) {
   char buf[4096];
   ssize_t got = recv(fd, buf, sizeof(buf), 0);
   if (got <= 0)
     return;
 
-  int len = static_cast<int>(got);
-  for (nlmsghdr *nlh = reinterpret_cast<nlmsghdr *>(buf); NLMSG_OK(nlh, len);
-       nlh = NLMSG_NEXT(nlh, len)) {
-    if (nlh->nlmsg_type != YZ_NL_MSG_EVENT)
-      continue;
-    if (nlh->nlmsg_len < NLMSG_LENGTH(sizeof(yz_event)))
-      continue;
-    auto *ev = static_cast<yz_event *>(NLMSG_DATA(nlh));
-    DLOGI("event type=%u pid=%u appid=%u", ev->type, ev->pid, ev->appid);
-    if (ev->type == YZ_EV_SPECIALIZE) {
-      if (g_safemode.active)
-        continue;
-      record_injection(ev->appid);
-      on_specialize(ev->pid, ev->appid);
-    } else if (ev->type == YZ_EV_RELOAD) {
-      rescan_modules();
-      read_yzconfig();
-      (void)yzpolicy::refresh(true);
-    } else if (ev->type == YZ_EV_SAFEMODE) {
-      note_safemode_event(ev->pid, ev->appid);
-    } else if (ev->type == YZ_EV_POLICY_REFRESH) {
-      yzpolicy::handle_refresh_request(ev->appid);
+  size_t remaining = static_cast<size_t>(got);
+  for (nlmsghdr *nlh = reinterpret_cast<nlmsghdr *>(buf);
+       remaining >= sizeof(*nlh) && nlh->nlmsg_len >= sizeof(*nlh) &&
+       nlh->nlmsg_len <= remaining;) {
+    if (nlh->nlmsg_type == YZ_NL_MSG_EVENT &&
+        nlh->nlmsg_len >= NLMSG_LENGTH(sizeof(yz_event))) {
+      auto *ev = static_cast<yz_event *>(NLMSG_DATA(nlh));
+      if (ev->type == YZ_EV_RELOAD) {
+        DLOGI("reload event");
+        rescan_modules();
+        read_yzconfig();
+        (void)yzpolicy::refresh(true);
+      } else if (ev->type == YZ_EV_SAFEMODE) {
+        DLOGI("safemode event pid=%u crashes=%u", ev->pid, ev->appid);
+      } else if (ev->type == YZ_EV_POLICY_REFRESH) {
+        yzpolicy::handle_refresh_request(ev->appid);
+      }
     }
+
+    const size_t step = NLMSG_ALIGN(nlh->nlmsg_len);
+    if (step > remaining)
+      break;
+    remaining -= step;
+    nlh = reinterpret_cast<nlmsghdr *>(reinterpret_cast<char *>(nlh) + step);
   }
 }
 
@@ -2061,13 +1508,12 @@ bool send_dlopen_offset() {
   return ret == 0;
 }
 
-int run_daemon(int argc, char **argv) {
+int run_daemon() {
   int ready_fd = consume_ready_fd();
-
-  if (!yzhost::parse_options(argc, argv)) {
-    notify_ready(ready_fd, false);
-    return 2;
-  }
+#if defined(__LP64__)
+  pid_t compat_pid = -1;
+#endif // #if defined(__LP64__)
+  yzhost::load_env();
 
   signal(SIGPIPE, SIG_IGN);
 
@@ -2085,15 +1531,6 @@ int run_daemon(int argc, char **argv) {
     return 1;
   }
 
-#if defined(__LP64__)
-  if (!spawn_compat_daemon()) {
-    DLOGE("zygiskd32 failed to start");
-    close(srv);
-    notify_ready(ready_fd, false);
-    return 1;
-  }
-#endif // #if defined(__LP64__)
-
   if (yzhost::ctl(YZ_IOCTL_PREPARE_RUNTIME_POLICY, nullptr) != 0) {
     DLOGE("failed to prepare runtime SELinux policy: %s", strerror(errno));
     close(srv);
@@ -2102,31 +1539,79 @@ int run_daemon(int argc, char **argv) {
   }
 
   int nlfd = nl_listen();
+  if (nlfd < 0) {
+    DLOGE("kernel event channel unavailable; exiting");
+    close(srv);
+    notify_ready(ready_fd, false);
+    return 1;
+  }
   yz_root_status_cmd root_status{};
-  bool policy_ready = false;
-  if (yzhost::get_root_status(&root_status)) {
-    policy_ready = yzpolicy::setup(yzhost::g_control_fd, root_status);
-  } else {
-    DLOGE("failed to read root policy status");
+  if (!yzhost::get_root_status(&root_status) ||
+      !yzpolicy::setup(yzhost::g_control_fd, root_status)) {
+    DLOGE("root policy unavailable; exiting");
+    close(nlfd);
+    close(srv);
+    notify_ready(ready_fd, false);
+    return 1;
   }
 
   rescan_modules();
   read_yzconfig();
-  refresh_safemode_status();
-  bool offsets_ready = send_dlopen_offset();
+  if (!send_dlopen_offset()) {
+    DLOGE("linker offsets unavailable; exiting");
+    close(nlfd);
+    close(srv);
+    notify_ready(ready_fd, false);
+    return 1;
+  }
+
+#if defined(__LP64__)
+  if (needs_compat_daemon()) {
+    compat_pid = spawn_compat_daemon();
+    if (compat_pid < 0) {
+      DLOGE("zygiskd32 failed to start");
+      close(nlfd);
+      close(srv);
+      notify_ready(ready_fd, false);
+      return 1;
+    }
+  } else {
+    DLOGI("no 32-bit zygote or native target; skipping zygiskd32");
+  }
+  if (yzhost::ctl(YZ_IOCTL_DAEMON_READY, nullptr) != 0) {
+    DLOGE("kernel rejected daemon readiness: %s", strerror(errno));
+    stop_compat_daemon(compat_pid);
+    close(nlfd);
+    close(srv);
+    notify_ready(ready_fd, false);
+    return 1;
+  }
+#endif // #if defined(__LP64__)
 
   DLOGI("zygiskd up: unix @%s, netlink proto=%d, modules=%s, config=%s, "
-        "policy=%s ready=%u",
+        "policy=%s",
         zygiskd::kSocketName, YZ_NETLINK_PROTO, yzhost::modules_dir().c_str(),
-        yzhost::config_path().c_str(), yzpolicy::source_name(),
-        policy_ready ? 1 : 0);
-  notify_ready(ready_fd, offsets_ready && policy_ready);
+        yzhost::config_path().c_str(), yzpolicy::source_name());
+  notify_ready(ready_fd, true);
 
   pollfd pfds[2] = {{srv, POLLIN, 0}, {nlfd, POLLIN, 0}};
-  nfds_t nfds = (nlfd >= 0) ? 2 : 1;
   for (;;) {
-    if (poll(pfds, nfds, -1) < 0)
-      continue;
+    if (poll(pfds, 2, -1) < 0) {
+      if (errno == EINTR)
+        continue;
+      DLOGE("poll failed: %s; exiting", strerror(errno));
+#if defined(__LP64__)
+      stop_compat_daemon(compat_pid);
+#endif // #if defined(__LP64__)
+      return 1;
+    }
+    if ((pfds[0].revents | pfds[1].revents) & (POLLERR | POLLHUP | POLLNVAL)) {
+      DLOGE("daemon channel failed; exiting");
+#if defined(__LP64__)
+      stop_compat_daemon(compat_pid);
+#endif // #if defined(__LP64__)
+      return 1;
+    }
     if (pfds[0].revents & POLLIN) {
       int client = accept4(srv, nullptr, nullptr, SOCK_CLOEXEC);
       if (client >= 0) {
@@ -2134,23 +1619,15 @@ int run_daemon(int argc, char **argv) {
         close(client);
       }
     }
-    if (nlfd >= 0 && (pfds[1].revents & POLLIN))
+    if (pfds[1].revents & POLLIN)
       nl_drain(nlfd);
   }
 }
 
 } // namespace
 
-extern "C" int zygiskd_main(int argc, char **argv) {
-  if (argc >= 2 && strcmp(argv[1], "--check-status") == 0)
-    return run_status_client(false);
-  if (argc >= 2 && strcmp(argv[1], "--status") == 0)
-    return run_status_client(true);
-  if (argc >= 2 && strcmp(argv[1], "--reload") == 0)
-    return run_reload_client();
-  return run_daemon(argc, argv);
-}
+extern "C" int zygiskd_main() { return run_daemon(); }
 
 #ifndef YZ_ZYGISKD_NO_MAIN
-int main(int argc, char **argv) { return zygiskd_main(argc, argv); }
+int main() { return zygiskd_main(); }
 #endif // #ifndef YZ_ZYGISKD_NO_MAIN

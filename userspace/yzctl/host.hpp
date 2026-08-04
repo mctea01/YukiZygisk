@@ -1,0 +1,31 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * YukiZygisk - Reusable standalone kernel control client.
+ *
+ * License: Apache-2.0
+ *
+ * Author: Anatdx
+ */
+#pragma once
+
+#include <string>
+
+namespace yzctl {
+
+class Host final {
+public:
+  Host() = default;
+  ~Host();
+
+  Host(const Host &) = delete;
+  Host &operator=(const Host &) = delete;
+
+  bool open(std::string *error);
+  int call(unsigned long request, void *arg) const;
+  bool available() const;
+
+private:
+  int fd_ = -1;
+};
+
+} // namespace yzctl
