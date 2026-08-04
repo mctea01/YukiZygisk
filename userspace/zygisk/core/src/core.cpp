@@ -904,13 +904,19 @@ static bool verify_handoff_pointer(const char *name, uintptr_t address,
   return false;
 }
 
+#if defined(__LP64__)
+using SelfRelocation = ElfW(Rela);
+#else
+using SelfRelocation = ElfW(Rel);
+#endif // #if defined(__LP64__)
+
 struct SelfDynamicInfo {
   const ElfW(Sym) *symtab = nullptr;
   const char *strtab = nullptr;
-  const ElfW(Rela) *jmprel = nullptr;
+  const SelfRelocation *jmprel = nullptr;
   size_t pltrelsz = 0;
-  const ElfW(Rela) *rela = nullptr;
-  size_t relasz = 0;
+  const SelfRelocation *rel = nullptr;
+  size_t relsz = 0;
 };
 
 static bool get_self_dynamic_info(uintptr_t load_bias, SelfDynamicInfo *info) {
@@ -929,18 +935,26 @@ static bool get_self_dynamic_info(uintptr_t load_bias, SelfDynamicInfo *info) {
           reinterpret_cast<const char *>(load_bias + entry->d_un.d_ptr);
       break;
     case DT_JMPREL:
-      info->jmprel =
-          reinterpret_cast<const ElfW(Rela) *>(load_bias + entry->d_un.d_ptr);
+      info->jmprel = reinterpret_cast<const SelfRelocation *>(
+          load_bias + entry->d_un.d_ptr);
       break;
     case DT_PLTRELSZ:
       info->pltrelsz = entry->d_un.d_val;
       break;
+#if defined(__LP64__)
     case DT_RELA:
-      info->rela =
-          reinterpret_cast<const ElfW(Rela) *>(load_bias + entry->d_un.d_ptr);
+#else
+    case DT_REL:
+#endif // #if defined(__LP64__)
+      info->rel = reinterpret_cast<const SelfRelocation *>(load_bias +
+                                                           entry->d_un.d_ptr);
       break;
+#if defined(__LP64__)
     case DT_RELASZ:
-      info->relasz = entry->d_un.d_val;
+#else
+    case DT_RELSZ:
+#endif // #if defined(__LP64__)
+      info->relsz = entry->d_un.d_val;
       break;
     default:
       break;
@@ -948,15 +962,16 @@ static bool get_self_dynamic_info(uintptr_t load_bias, SelfDynamicInfo *info) {
   }
 
   if (info->symtab == nullptr || info->strtab == nullptr ||
-      info->pltrelsz % sizeof(ElfW(Rela)) != 0 ||
-      info->relasz % sizeof(ElfW(Rela)) != 0) {
+      info->pltrelsz % sizeof(SelfRelocation) != 0 ||
+      info->relsz % sizeof(SelfRelocation) != 0) {
     LOGE("loader handoff: malformed core dynamic relocation metadata");
     return false;
   }
   return true;
 }
 
-static bool verify_relocation_table(const ElfW(Rela) * table, size_t table_size,
+static bool verify_relocation_table(const SelfRelocation *table,
+                                    size_t table_size,
                                     const SelfDynamicInfo &info,
                                     const LoaderMapIdentity &loader) {
   if (table == nullptr && table_size != 0) {
@@ -965,7 +980,7 @@ static bool verify_relocation_table(const ElfW(Rela) * table, size_t table_size,
   }
 
   bool complete = true;
-  const size_t count = table_size / sizeof(ElfW(Rela));
+  const size_t count = table_size / sizeof(SelfRelocation);
   for (size_t i = 0; i < count; ++i) {
     const auto &reloc = table[i];
     if (reloc.r_offset > g_self_size ||
@@ -975,7 +990,11 @@ static bool verify_relocation_table(const ElfW(Rela) * table, size_t table_size,
       continue;
     }
 
+#if defined(__LP64__)
     const auto symbol_index = ELF64_R_SYM(reloc.r_info);
+#else
+    const auto symbol_index = ELF32_R_SYM(reloc.r_info);
+#endif // #if defined(__LP64__)
     const char *name = symbol_index == 0
                            ? "<relative>"
                            : info.strtab + info.symtab[symbol_index].st_name;
@@ -1009,7 +1028,7 @@ static bool first_stage_handoff_complete() {
   if (!get_self_dynamic_info(g_self_base, &info))
     return false;
   complete &= verify_relocation_table(info.jmprel, info.pltrelsz, info, loader);
-  complete &= verify_relocation_table(info.rela, info.relasz, info, loader);
+  complete &= verify_relocation_table(info.rel, info.relsz, info, loader);
   return complete;
 }
 

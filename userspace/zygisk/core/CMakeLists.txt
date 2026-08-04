@@ -12,6 +12,26 @@ project(zygisk_core VERSION 1.0.0 LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a" AND
+   NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
+    message(FATAL_ERROR
+        "YukiZygisk supports Android arm64-v8a and armeabi-v7a only")
+endif()
+
+set(YUKILINKER_ARCH_SOURCES)
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set(YUKIZYGISK_ABI_SUFFIX 64)
+    list(APPEND YUKILINKER_ARCH_SOURCES src/yukilinker_tlsdesc.S)
+else()
+    set(YUKIZYGISK_ABI_SUFFIX 32)
+endif()
+
+# Remove outputs left by builds from before filenames became ABI-explicit.
+file(REMOVE
+    "${CMAKE_CURRENT_BINARY_DIR}/libzygisk.so"
+    "${CMAKE_CURRENT_BINARY_DIR}/libyukilinker.so"
+    "${CMAKE_CURRENT_BINARY_DIR}/libyukizncore.so")
+
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -30,18 +50,20 @@ target_compile_definitions(lsplt_static PRIVATE LOG_DISABLED)
 add_library(zygisk SHARED
     src/core.cpp
     src/hook.cpp
-    # the anonymous in-memory loader, compiled INTO the core so libzygisk carries
-    # its own copy -- the separate libyukilinker first stage is then unloaded
+    # the anonymous in-memory loader, compiled INTO the core so it carries its
+    # own copy -- the separate first stage is then unloaded
     # right after handoff (zygisk_finalize_loader) instead of lingering.
     src/yukilinker.cpp
-    src/yukilinker_tlsdesc.S
+    ${YUKILINKER_ARCH_SOURCES}
     # synchronous self-unmap: capture-stub template + tail-call munmap.
     src/self_unmap.S
     # solist unlink and maps hiding helpers.
     src/solist.cpp
 )
-# -> libzygisk.so
-set_target_properties(zygisk PROPERTIES PREFIX "lib" OUTPUT_NAME zygisk)
+# -> libzygisk64.so / libzygisk32.so
+set_target_properties(zygisk PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "zygisk${YUKIZYGISK_ABI_SUFFIX}")
 
 # The public ABI contract (zygisk.hpp) lives in ../include.
 target_include_directories(zygisk PRIVATE
@@ -78,14 +100,16 @@ target_link_options(zygisk PRIVATE -Wl,--gc-sections -Wl,--strip-all
 add_library(yukizncore SHARED
     src/yukizncore.cpp
     src/yukilinker.cpp
-    src/yukilinker_tlsdesc.S
+    ${YUKILINKER_ARCH_SOURCES}
     src/self_unmap.S
     src/solist.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xz-embedded/xz_dec_lzma2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xz-embedded/xz_dec_stream.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xz-embedded/xz_dec_bcj.c
 )
-set_target_properties(yukizncore PROPERTIES PREFIX "lib" OUTPUT_NAME yukizncore)
+set_target_properties(yukizncore PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "yukizncore${YUKIZYGISK_ABI_SUFFIX}")
 target_include_directories(yukizncore PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../daemon
@@ -109,13 +133,16 @@ target_link_libraries(yukizncore PRIVATE dl lsplt_static)
 target_link_options(yukizncore PRIVATE -Wl,--gc-sections -Wl,--strip-all
                     -Wl,--as-needed)
 
-# libyukilinker.so -- the anonymous in-memory module loader, split into its own
-# .so that core dlopen+dlsym's at runtime (exports yuki_dlopen_memfd/dlsym/
-# dlclose). Same source as compiled-in; no lsplt/solist deps.
+# libyukilinker64.so / libyukilinker32.so -- the anonymous in-memory module
+# loader, split into its own .so that core dlopen+dlsym's at runtime (exports
+# yuki_dlopen_memfd/dlsym/dlclose). Same source as compiled-in; no lsplt/solist
+# deps.
 add_library(yukilinker SHARED
     src/yukilinker.cpp
-    src/yukilinker_tlsdesc.S)
-set_target_properties(yukilinker PROPERTIES PREFIX "lib" OUTPUT_NAME yukilinker)
+    ${YUKILINKER_ARCH_SOURCES})
+set_target_properties(yukilinker PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "yukilinker${YUKIZYGISK_ABI_SUFFIX}")
 target_include_directories(yukilinker PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../..)  # repo root

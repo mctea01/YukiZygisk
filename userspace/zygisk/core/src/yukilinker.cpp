@@ -31,6 +31,7 @@
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "log.hpp"
@@ -86,6 +87,39 @@ __attribute__((visibility("hidden"))) YukiTlsFastConfig yuki_tls_fast_config{};
 #ifndef R_AARCH64_IRELATIVE
 #define R_AARCH64_IRELATIVE 1032
 #endif // #ifndef R_AARCH64_IRELATIVE
+#ifndef R_ARM_NONE
+#define R_ARM_NONE 0
+#endif // #ifndef R_ARM_NONE
+#ifndef R_ARM_ABS32
+#define R_ARM_ABS32 2
+#endif // #ifndef R_ARM_ABS32
+#ifndef R_ARM_REL32
+#define R_ARM_REL32 3
+#endif // #ifndef R_ARM_REL32
+#ifndef R_ARM_TLS_DESC
+#define R_ARM_TLS_DESC 13
+#endif // #ifndef R_ARM_TLS_DESC
+#ifndef R_ARM_TLS_DTPMOD32
+#define R_ARM_TLS_DTPMOD32 17
+#endif // #ifndef R_ARM_TLS_DTPMOD32
+#ifndef R_ARM_TLS_DTPOFF32
+#define R_ARM_TLS_DTPOFF32 18
+#endif // #ifndef R_ARM_TLS_DTPOFF32
+#ifndef R_ARM_TLS_TPOFF32
+#define R_ARM_TLS_TPOFF32 19
+#endif // #ifndef R_ARM_TLS_TPOFF32
+#ifndef R_ARM_GLOB_DAT
+#define R_ARM_GLOB_DAT 21
+#endif // #ifndef R_ARM_GLOB_DAT
+#ifndef R_ARM_JUMP_SLOT
+#define R_ARM_JUMP_SLOT 22
+#endif // #ifndef R_ARM_JUMP_SLOT
+#ifndef R_ARM_RELATIVE
+#define R_ARM_RELATIVE 23
+#endif // #ifndef R_ARM_RELATIVE
+#ifndef R_ARM_IRELATIVE
+#define R_ARM_IRELATIVE 160
+#endif // #ifndef R_ARM_IRELATIVE
 #ifndef STT_TLS
 #define STT_TLS 6
 #endif // #ifndef STT_TLS
@@ -113,6 +147,18 @@ __attribute__((visibility("hidden"))) YukiTlsFastConfig yuki_tls_fast_config{};
 
 namespace yukilinker {
 namespace {
+
+#if defined(__LP64__)
+using ElfRelocation = ElfW(Rela);
+constexpr ElfW(Sxword) kDynamicRelTag = DT_RELA;
+constexpr ElfW(Sxword) kDynamicRelSizeTag = DT_RELASZ;
+constexpr ElfW(Sxword) kDynamicRelEntryTag = DT_RELAENT;
+#else
+using ElfRelocation = ElfW(Rel);
+constexpr ElfW(Sxword) kDynamicRelTag = DT_REL;
+constexpr ElfW(Sxword) kDynamicRelSizeTag = DT_RELSZ;
+constexpr ElfW(Sxword) kDynamicRelEntryTag = DT_RELENT;
+#endif
 
 constexpr size_t kMetadataPageSize = 64 * 1024;
 size_t g_page_size = 0;
@@ -294,9 +340,9 @@ struct DynamicSymbols {
 };
 
 struct RelocationSet {
-  const ElfW(Rela) *rela = nullptr;
-  size_t rela_bytes = 0;
-  const ElfW(Rela) *plt = nullptr;
+  const ElfRelocation *rel = nullptr;
+  size_t rel_bytes = 0;
+  const ElfRelocation *plt = nullptr;
   size_t plt_bytes = 0;
   const ElfW(Addr) *relr = nullptr;
   size_t relr_bytes = 0;
@@ -458,10 +504,12 @@ bool inspect_source(const void *source, size_t file_size,
     return false;
   auto *header = static_cast<const ElfW(Ehdr) *>(source);
   if (memcmp(header->e_ident, ELFMAG, SELFMAG) != 0 ||
-      header->e_ident[EI_CLASS] != ELFCLASS64 ||
+      header->e_ident[EI_CLASS] !=
+          (sizeof(void *) == 8 ? ELFCLASS64 : ELFCLASS32) ||
       header->e_ident[EI_DATA] != ELFDATA2LSB ||
-      header->e_machine != EM_AARCH64 || header->e_type != ET_DYN ||
-      header->e_phentsize != sizeof(ElfW(Phdr)) || header->e_phnum == 0)
+      header->e_machine != (sizeof(void *) == 8 ? EM_AARCH64 : EM_ARM) ||
+      header->e_type != ET_DYN || header->e_phentsize != sizeof(ElfW(Phdr)) ||
+      header->e_phnum == 0)
     return false;
 
   size_t phdr_bytes;
@@ -686,9 +734,9 @@ struct DynamicParse {
   size_t init_array_bytes = 0;
   size_t fini_array_bytes = 0;
   size_t symbol_entry_size = sizeof(ElfW(Sym));
-  size_t rela_entry_size = sizeof(ElfW(Rela));
+  size_t rel_entry_size = sizeof(ElfRelocation);
   size_t relr_entry_size = sizeof(ElfW(Addr));
-  ElfW(Sxword) plt_relocation_kind = DT_RELA;
+  ElfW(Sxword) plt_relocation_kind = kDynamicRelTag;
   bool terminated = false;
 };
 
@@ -736,17 +784,17 @@ bool parse_dynamic_tags(ImageState *image, size_t dynamic_index,
     case DT_GNU_HASH:
       parse->gnu_hash = dynamic_pointer<uint32_t>(image, entry);
       break;
-    case DT_RELA:
-      image->relocations.rela = dynamic_pointer<ElfW(Rela)>(image, entry);
+    case kDynamicRelTag:
+      image->relocations.rel = dynamic_pointer<ElfRelocation>(image, entry);
       break;
-    case DT_RELASZ:
-      image->relocations.rela_bytes = entry.d_un.d_val;
+    case kDynamicRelSizeTag:
+      image->relocations.rel_bytes = entry.d_un.d_val;
       break;
-    case DT_RELAENT:
-      parse->rela_entry_size = entry.d_un.d_val;
+    case kDynamicRelEntryTag:
+      parse->rel_entry_size = entry.d_un.d_val;
       break;
     case DT_JMPREL:
-      image->relocations.plt = dynamic_pointer<ElfW(Rela)>(image, entry);
+      image->relocations.plt = dynamic_pointer<ElfRelocation>(image, entry);
       break;
     case DT_PLTRELSZ:
       image->relocations.plt_bytes = entry.d_un.d_val;
@@ -816,9 +864,9 @@ bool parse_dynamic_tags(ImageState *image, size_t dynamic_index,
   if (!parse->terminated || image->symbols.entries == nullptr ||
       image->symbols.strings == nullptr || image->symbols.string_bytes == 0 ||
       parse->symbol_entry_size != sizeof(ElfW(Sym)) ||
-      parse->rela_entry_size != sizeof(ElfW(Rela)) ||
+      parse->rel_entry_size != sizeof(ElfRelocation) ||
       parse->relr_entry_size != sizeof(ElfW(Addr)) ||
-      parse->plt_relocation_kind != DT_RELA)
+      parse->plt_relocation_kind != kDynamicRelTag)
     return false;
 
   if (parse->init_array_bytes % sizeof(LifecycleFunction) != 0 ||
@@ -840,10 +888,10 @@ bool parse_dynamic_tags(ImageState *image, size_t dynamic_index,
 
   if (!mapped_bytes(image, image->symbols.strings, image->symbols.string_bytes))
     return false;
-  if ((image->relocations.rela_bytes != 0 &&
-       (image->relocations.rela == nullptr ||
-        !mapped_bytes(image, image->relocations.rela,
-                      image->relocations.rela_bytes))) ||
+  if ((image->relocations.rel_bytes != 0 &&
+       (image->relocations.rel == nullptr ||
+        !mapped_bytes(image, image->relocations.rel,
+                      image->relocations.rel_bytes))) ||
       (image->relocations.plt_bytes != 0 &&
        (image->relocations.plt == nullptr ||
         !mapped_bytes(image, image->relocations.plt,
@@ -1574,15 +1622,16 @@ uintptr_t current_thread_pointer() {
 #endif // #if defined(__aarch64__)
 }
 
+#if defined(__aarch64__)
 extern "C" uintptr_t yuki_tlsdesc_dynamic_entry(uintptr_t *descriptor);
 extern "C" uintptr_t yuki_tlsdesc_weak_entry(uintptr_t *descriptor);
-
 extern "C" __attribute__((visibility("hidden"))) uintptr_t
 yuki_tlsdesc_dynamic_body(uintptr_t *descriptor) {
   auto *index = reinterpret_cast<TlsIndex *>(descriptor[1]);
   void *address = yuki_tls_get_addr(index);
   return reinterpret_cast<uintptr_t>(address) - current_thread_pointer();
 }
+#endif // #if defined(__aarch64__)
 #else
 struct TlsIndex {
   unsigned long module;
@@ -1671,8 +1720,13 @@ void run_finalizers(ImageState *image) {
 }
 
 uintptr_t invoke_ifunc(uintptr_t resolver) {
+#if defined(__aarch64__)
   using Resolver = ElfW(Addr) (*)(uint64_t);
   return reinterpret_cast<Resolver>(resolver)(getauxval(AT_HWCAP));
+#else
+  using Resolver = ElfW(Addr) (*)();
+  return reinterpret_cast<Resolver>(resolver)();
+#endif // #if defined(__aarch64__)
 }
 
 struct SymbolResolution {
@@ -1782,24 +1836,53 @@ bool resolve_tls_reference(ImageState *image, uint32_t symbol_index,
 }
 #endif // #if YUKILINKER_FULL
 
-uint64_t *relocation_destination(ImageState *image, ElfW(Addr) offset) {
-  return runtime_pointer<uint64_t>(image, offset);
+ElfW(Addr) * relocation_destination(ImageState *image, ElfW(Addr) offset) {
+  return runtime_pointer<ElfW(Addr)>(image, offset);
 }
 
-bool apply_relocation(ImageState *image, const ElfW(Rela) & relocation) {
-  uint32_t type = ELF64_R_TYPE(relocation.r_info);
-  uint32_t symbol_index = ELF64_R_SYM(relocation.r_info);
-  uint64_t *destination = relocation_destination(image, relocation.r_offset);
+uint32_t relocation_type(const ElfRelocation &relocation) {
+#if defined(__LP64__)
+  return ELF64_R_TYPE(relocation.r_info);
+#else
+  return ELF32_R_TYPE(relocation.r_info);
+#endif // #if defined(__LP64__)
+}
+
+uint32_t relocation_symbol(const ElfRelocation &relocation) {
+#if defined(__LP64__)
+  return ELF64_R_SYM(relocation.r_info);
+#else
+  return ELF32_R_SYM(relocation.r_info);
+#endif // #if defined(__LP64__)
+}
+
+ElfW(Sxword)
+    relocation_addend(const ElfRelocation &relocation, ElfW(Addr) value) {
+#if defined(__LP64__)
+  (void)value;
+  return relocation.r_addend;
+#else
+  (void)relocation;
+  return static_cast<ElfW(Sword)>(value);
+#endif // #if defined(__LP64__)
+}
+
+bool apply_relocation(ImageState *image, const ElfRelocation &relocation) {
+  uint32_t type = relocation_type(relocation);
+  uint32_t symbol_index = relocation_symbol(relocation);
+  ElfW(Addr) *destination = relocation_destination(image, relocation.r_offset);
   if (destination == nullptr)
     return false;
+  ElfW(Sxword) addend = relocation_addend(relocation, *destination);
 
+#if defined(__aarch64__)
   switch (type) {
   case R_AARCH64_NONE:
     return true;
   case R_AARCH64_RELATIVE: {
     uintptr_t value;
     if (!add_signed_offset(reinterpret_cast<uintptr_t>(image->memory.bias),
-                           relocation.r_addend, &value))
+                           addend, &value))
       return false;
     *destination = value;
     return true;
@@ -1807,7 +1890,7 @@ bool apply_relocation(ImageState *image, const ElfW(Rela) & relocation) {
   case R_AARCH64_IRELATIVE: {
     uintptr_t resolver;
     if (!add_signed_offset(reinterpret_cast<uintptr_t>(image->memory.bias),
-                           relocation.r_addend, &resolver) ||
+                           addend, &resolver) ||
         !image_contains(image, reinterpret_cast<void *>(resolver)))
       return false;
     *destination = invoke_ifunc(resolver);
@@ -1816,8 +1899,7 @@ bool apply_relocation(ImageState *image, const ElfW(Rela) & relocation) {
 #if YUKILINKER_FULL
   case R_AARCH64_TLSDESC: {
     TlsReference reference;
-    if (!resolve_tls_reference(image, symbol_index, relocation.r_addend,
-                               &reference))
+    if (!resolve_tls_reference(image, symbol_index, addend, &reference))
       return false;
     auto *descriptor = reinterpret_cast<uintptr_t *>(destination);
     if (reference.unresolved_weak) {
@@ -1837,24 +1919,21 @@ bool apply_relocation(ImageState *image, const ElfW(Rela) & relocation) {
   }
   case R_AARCH64_TLS_DTPREL64: {
     TlsReference reference;
-    if (!resolve_tls_reference(image, symbol_index, relocation.r_addend,
-                               &reference))
+    if (!resolve_tls_reference(image, symbol_index, addend, &reference))
       return false;
     *destination = reference.byte_offset;
     return true;
   }
   case R_AARCH64_TLS_DTPMOD64: {
     TlsReference reference;
-    if (!resolve_tls_reference(image, symbol_index, relocation.r_addend,
-                               &reference))
+    if (!resolve_tls_reference(image, symbol_index, addend, &reference))
       return false;
     *destination = reference.unresolved_weak ? 0 : reference.module_id;
     return true;
   }
   case R_AARCH64_TLS_TPREL64: {
     TlsReference reference;
-    if (!resolve_tls_reference(image, symbol_index, relocation.r_addend,
-                               &reference))
+    if (!resolve_tls_reference(image, symbol_index, addend, &reference))
       return false;
     if (reference.unresolved_weak) {
       *destination = 0;
@@ -1867,8 +1946,7 @@ bool apply_relocation(ImageState *image, const ElfW(Rela) & relocation) {
   case R_AARCH64_ABS64: {
     SymbolResolution symbol = resolve_symbol(image, symbol_index);
     uintptr_t value;
-    if (!symbol.valid ||
-        !add_signed_offset(symbol.address, relocation.r_addend, &value))
+    if (!symbol.valid || !add_signed_offset(symbol.address, addend, &value))
       return false;
     *destination = value;
     return true;
@@ -1885,15 +1963,97 @@ bool apply_relocation(ImageState *image, const ElfW(Rela) & relocation) {
     ZLOGE("yukilinker: unsupported AArch64 relocation %u", type);
     return false;
   }
+#else
+  switch (type) {
+  case R_ARM_NONE:
+    return true;
+  case R_ARM_RELATIVE: {
+    uintptr_t value;
+    if (!add_signed_offset(reinterpret_cast<uintptr_t>(image->memory.bias),
+                           addend, &value))
+      return false;
+    *destination = static_cast<ElfW(Addr)>(value);
+    return true;
+  }
+  case R_ARM_IRELATIVE: {
+    uintptr_t resolver;
+    if (!add_signed_offset(reinterpret_cast<uintptr_t>(image->memory.bias),
+                           addend, &resolver) ||
+        !image_contains(image, reinterpret_cast<void *>(resolver)))
+      return false;
+    *destination = static_cast<ElfW(Addr)>(invoke_ifunc(resolver));
+    return true;
+  }
+  case R_ARM_ABS32: {
+    SymbolResolution symbol = resolve_symbol(image, symbol_index);
+    uintptr_t value;
+    if (!symbol.valid || !add_signed_offset(symbol.address, addend, &value))
+      return false;
+    *destination = static_cast<ElfW(Addr)>(value);
+    return true;
+  }
+  case R_ARM_REL32: {
+    SymbolResolution symbol = resolve_symbol(image, symbol_index);
+    uintptr_t value;
+    if (!symbol.valid || !add_signed_offset(symbol.address, addend, &value))
+      return false;
+    *destination = static_cast<ElfW(Addr)>(
+        value - reinterpret_cast<uintptr_t>(destination));
+    return true;
+  }
+  case R_ARM_GLOB_DAT:
+  case R_ARM_JUMP_SLOT: {
+    SymbolResolution symbol = resolve_symbol(image, symbol_index);
+    if (!symbol.valid)
+      return false;
+    *destination = static_cast<ElfW(Addr)>(symbol.address);
+    return true;
+  }
+#if YUKILINKER_FULL
+  case R_ARM_TLS_DTPMOD32: {
+    TlsReference reference;
+    if (!resolve_tls_reference(image, symbol_index, 0, &reference))
+      return false;
+    *destination = static_cast<ElfW(Addr)>(
+        reference.unresolved_weak ? 0 : reference.module_id);
+    return true;
+  }
+  case R_ARM_TLS_DTPOFF32: {
+    TlsReference reference;
+    if (!resolve_tls_reference(image, symbol_index, addend, &reference))
+      return false;
+    *destination = static_cast<ElfW(Addr)>(reference.byte_offset);
+    return true;
+  }
+  case R_ARM_TLS_TPOFF32: {
+    TlsReference reference;
+    if (!resolve_tls_reference(image, symbol_index, addend, &reference))
+      return false;
+    if (reference.unresolved_weak) {
+      *destination = 0;
+      return true;
+    }
+    ZLOGE("yukilinker: ARM static TLS access model is unsupported");
+    return false;
+  }
+#endif // #if YUKILINKER_FULL
+  case R_ARM_TLS_DESC:
+    ZLOGE("yukilinker: ARM TLSDESC is not emitted by Android lld");
+    return false;
+  default:
+    ZLOGE("yukilinker: unsupported ARM relocation %u", type);
+    return false;
+  }
+#endif // #if defined(__aarch64__)
 }
 
-bool apply_rela_span(ImageState *image, const ElfW(Rela) * entries,
-                     size_t bytes) {
+bool apply_relocation_span(ImageState *image, const ElfRelocation *entries,
+                           size_t bytes) {
   if (bytes == 0)
     return true;
-  if (entries == nullptr || bytes % sizeof(ElfW(Rela)) != 0)
+  if (entries == nullptr || bytes % sizeof(ElfRelocation) != 0)
     return false;
-  size_t count = bytes / sizeof(ElfW(Rela));
+  size_t count = bytes / sizeof(ElfRelocation);
   for (size_t i = 0; i < count; ++i)
     if (!apply_relocation(image, entries[i]))
       return false;
@@ -1947,10 +2107,10 @@ bool apply_relr_span(ImageState *image) {
 
 bool relocate_image(ImageState *image) {
   return apply_relr_span(image) &&
-         apply_rela_span(image, image->relocations.rela,
-                         image->relocations.rela_bytes) &&
-         apply_rela_span(image, image->relocations.plt,
-                         image->relocations.plt_bytes);
+         apply_relocation_span(image, image->relocations.rel,
+                               image->relocations.rel_bytes) &&
+         apply_relocation_span(image, image->relocations.plt,
+                               image->relocations.plt_bytes);
 }
 
 void release_failed_image(ImageState *image) {
@@ -1984,7 +2144,7 @@ SoHandle *dlopen_memfd(int memfd, const char *vma_name, bool file_backed) {
   SourceLayout layout;
   if (!inspect_source(source, file_size, &layout)) {
     munmap(source, file_size);
-    ZLOGE("yukilinker: invalid AArch64 shared object");
+    ZLOGE("yukilinker: invalid shared object for this ABI");
     return nullptr;
   }
 
@@ -2198,7 +2358,7 @@ void raw_close_descriptor(int fd) {
   register long argument asm("x0") = fd;
   asm volatile("svc #0" : "+r"(argument) : "r"(syscall_number) : "memory");
 #else
-  (void)fd;
+  (void)syscall(__NR_close, fd);
 #endif // #if defined(__aarch64__)
 }
 
@@ -2236,7 +2396,11 @@ void close_early_packet(int packet_fd) {
   raw_close_descriptor(packet_fd);
 }
 
-constexpr char kCorePath[] = "/data/adb/ksu/lib/yukizygisk/libzygisk.so";
+#if defined(__LP64__)
+constexpr char kCorePath[] = "/data/adb/yukizygisk/lib/libzygisk64.so";
+#else
+constexpr char kCorePath[] = "/data/adb/yukizygisk/lib/libzygisk32.so";
+#endif // #if defined(__LP64__)
 
 } // namespace
 

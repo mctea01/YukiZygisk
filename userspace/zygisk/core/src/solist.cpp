@@ -18,6 +18,7 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -511,7 +512,7 @@ bool find_cfi_shadow(CfiShadowRange *out) {
       continue;
     uintptr_t start = 0, end = 0;
     char perms[5] = {};
-    if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3)
+    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %4s", &start, &end, perms) != 3)
       continue;
     out->start = start;
     out->end = end;
@@ -631,7 +632,7 @@ int spoof_virtual_maps(const char *path_substr, bool private_only) {
       continue;
     uintptr_t start = 0, end = 0;
     char perms[5] = {};
-    if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3)
+    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %4s", &start, &end, perms) != 3)
       continue;
     if (private_only && perms[3] != 'p')
       continue; // skip shared mappings (e.g. ART's own memfd) when asked
@@ -664,8 +665,8 @@ int spoof_fd_maps(int fd, bool private_only) {
     unsigned int dev_major = 0, dev_minor = 0;
     unsigned long inode = 0;
     char perms[5] = {};
-    if (sscanf(line, "%lx-%lx %4s %*s %x:%x %lu", &start, &end, perms,
-               &dev_major, &dev_minor, &inode) != 6)
+    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %4s %*s %x:%x %lu", &start,
+               &end, perms, &dev_major, &dev_minor, &inode) != 6)
       continue;
     if (makedev(dev_major, dev_minor) != st.st_dev ||
         static_cast<ino_t>(inode) != st.st_ino)
@@ -694,8 +695,8 @@ int name_anonymous_exec() {
     uintptr_t start = 0, end = 0;
     char perms[5] = {};
     int path_off = 0;
-    if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %n", &start, &end, perms,
-               &path_off) < 3)
+    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %4s %*s %*s %*s %n", &start,
+               &end, perms, &path_off) < 3)
       continue;
     if (strchr(perms, 'x') == nullptr)
       continue; // executable only
