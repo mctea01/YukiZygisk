@@ -469,8 +469,6 @@ void append_zygotes(std::string *json, const RuntimeSnapshot &snapshot,
     append_json_string(json, target);
     *json += ",\"target\":";
     append_json_string(json, target);
-    *json += ",\"process\":";
-    append_json_string(json, bounded_string(record.process));
     *json += ",\"abi\":";
     append_json_string(json, abi_name(record.abi));
     if (monitor) {

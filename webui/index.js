@@ -177,13 +177,19 @@ function renderNativeModules(injections) {
   }).join("");
 }
 
+function nativeProcessDisplayName(value) {
+  const process = String(value || "");
+  const separator = process.lastIndexOf("/");
+  return separator >= 0 && separator + 1 < process.length ? process.slice(separator + 1) : process;
+}
+
 function renderNativeProcesses(injections) {
   const grouped = new Map();
   for (const injection of injections) {
     const key = `${injection.pid}\u0000${injection.process}`;
     const row = grouped.get(key) || {
       pid: injection.pid,
-      process: injection.process || injection.target,
+      process: nativeProcessDisplayName(injection.process || injection.target),
       abi: injection.abi,
       modules: [],
       records: [],
@@ -252,8 +258,7 @@ function renderStatus() {
     <section class="panel span-2">
       ${sectionHeader(t("status.zygoteMonitor"), t("status.zygoteMonitorDesc"))}
       <div class="data-list">${zygotes.length ? zygotes.map((item) => {
-        const process = item.process && item.process !== item.name ? `${escapeHtml(item.process)} · ` : "";
-        return `<div class="data-row"><div class="identity"><strong>${escapeHtml(item.name)}</strong><span>${process}PID ${escapeHtml(item.pid)}</span></div><code>${escapeHtml(item.abi)}</code>${stateBadge(item.state)}</div>`;
+        return `<div class="data-row"><div class="identity"><strong>${escapeHtml(item.name)}</strong><span>PID ${escapeHtml(item.pid)}</span></div><code>${escapeHtml(item.abi)}</code>${stateBadge(item.state)}</div>`;
       }).join("") : emptyState(t("common.none"))}</div>
     </section>
 

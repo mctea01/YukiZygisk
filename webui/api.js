@@ -138,8 +138,8 @@ const mockState = {
     denylist_mode: 1,
     recent: [10123, 10244, 10188, 10072],
     zygote_monitor: [
-      { pid: 1771, name: "zygote", process: "/system/bin/app_process64", abi: "arm64-v8a", state: "injected" },
-      { pid: 1772, name: "zygote_ocomp", process: "/system/bin/app_process64", abi: "arm64-v8a", state: "injected" },
+      { pid: 1771, name: "zygote", abi: "arm64-v8a", state: "injected" },
+      { pid: 1772, name: "zygote_ocomp", abi: "arm64-v8a", state: "injected" },
     ],
     modules: ["zygisk_lsposed", "playintegrityfix"],
     native_modules: [
