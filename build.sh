@@ -54,12 +54,12 @@ Usage:
 Options:
   -k, --kmi KMI              Build/package one DDK target (default: .ddk-version)
       --all-kmis             Build/package every supported KMI
-  -a, --abi ABI              Android ABI for userspace daemon (default: arm64-v8a)
+  -a, --abi ABI              Primary device ABI; compat ARM is always included
       --android-platform API Android platform for daemon (default: android-29)
       --ndk PATH             Android NDK path
       --skip-kernel          Reuse KMI-tagged modules in build/out/lkm
-      --skip-daemon          Reuse build/out/zygiskd
-      --skip-payloads        Reuse build/out/lib*.so runtime payloads
+      --skip-daemon          Reuse build/out/zygiskd64 and zygiskd32
+      --skip-payloads        Reuse dual-ABI build/out/lib*.so payloads
       --keep-build           Keep intermediate build directories
       --no-strip             Keep debug info in Android artifacts
   -v, --verbose              Verbose CMake configure output
@@ -308,53 +308,53 @@ build_kernel() {
 
 build_daemon() {
 	if [[ "$SKIP_DAEMON" == true ]]; then
-		[[ -f "$OUT_DIR/zygiskd" ]] ||
-			die "--skip-daemon requested but build/out/zygiskd is missing"
+		[[ -f "$OUT_DIR/zygiskd64" && -f "$OUT_DIR/zygiskd32" ]] ||
+			die "--skip-daemon requested but dual-ABI daemon outputs are missing"
 		info "Skip daemon build"
 		return
 	fi
-
-	case "$ABI" in
-	arm64-v8a) ;;
-	*) die "unsupported module ABI for now: $ABI" ;;
-	esac
 
 	check_common_deps
 	find_ndk
 	[[ -f "$ANDROID_NDK/build/cmake/android.toolchain.cmake" ]] ||
 		die "invalid Android NDK: $ANDROID_NDK"
 
-	local subdir="$BUILD_DIR/$ABI"
-	local cmake_args=(
-		-S "$PROJECT_ROOT"
-		-B "$subdir"
-		-G Ninja
-		-DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"
-		-DANDROID_ABI="$ABI"
-		-DANDROID_PLATFORM="$ANDROID_PLATFORM"
-		-DCMAKE_BUILD_TYPE=Release
-	)
-	if [[ "$VERBOSE" == true ]]; then
-		cmake_args+=("--log-level=VERBOSE")
-	fi
-
-	info "Build zygiskd ($ABI, $ANDROID_PLATFORM)"
-	cmake "${cmake_args[@]}"
-	cmake --build "$subdir" --target zygiskd
-
-	local bin="$subdir/userspace/zygisk/daemon/zygiskd"
-	[[ -f "$bin" ]] || die "zygiskd output missing: $bin"
 	mkdir -p "$OUT_DIR"
-	cp "$bin" "$OUT_DIR/zygiskd"
-	strip_android_file --strip-all "$OUT_DIR/zygiskd"
-	chmod 0755 "$OUT_DIR/zygiskd"
-	info "Daemon: $OUT_DIR/zygiskd"
+	local target_abi output subdir bin
+	for target_abi in arm64-v8a armeabi-v7a; do
+		output="zygiskd64"
+		[[ "$target_abi" == armeabi-v7a ]] && output="zygiskd32"
+		subdir="$BUILD_DIR/$target_abi"
+		local cmake_args=(
+			-S "$PROJECT_ROOT"
+			-B "$subdir"
+			-G Ninja
+			-DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"
+			-DANDROID_ABI="$target_abi"
+			-DANDROID_PLATFORM="$ANDROID_PLATFORM"
+			-DCMAKE_BUILD_TYPE=Release
+		)
+		if [[ "$VERBOSE" == true ]]; then
+			cmake_args+=("--log-level=VERBOSE")
+		fi
+		info "Build $output ($target_abi, $ANDROID_PLATFORM)"
+		cmake "${cmake_args[@]}"
+		cmake --build "$subdir" --target "$output"
+		bin="$subdir/userspace/zygisk/daemon/$output"
+		[[ -f "$bin" ]] || die "$output missing: $bin"
+		cp "$bin" "$OUT_DIR/$output"
+		strip_android_file --strip-all "$OUT_DIR/$output"
+		chmod 0755 "$OUT_DIR/$output"
+	done
 }
 
 build_payloads() {
 	local lib
+	rm -f "$OUT_DIR/libzygisk.so" "$OUT_DIR/libyukilinker.so" \
+		"$OUT_DIR/libyukizncore.so"
 	if [[ "$SKIP_PAYLOADS" == true ]]; then
-		for lib in libzygisk.so libyukilinker.so libyukizncore.so; do
+		for lib in libzygisk64.so libzygisk32.so libyukilinker64.so \
+			libyukilinker32.so libyukizncore64.so libyukizncore32.so; do
 			[[ -f "$OUT_DIR/$lib" ]] ||
 				die "--skip-payloads requested but build/out/$lib is missing"
 		done
@@ -362,48 +362,50 @@ build_payloads() {
 		return
 	fi
 
-	case "$ABI" in
-	arm64-v8a) ;;
-	*) die "unsupported module ABI for now: $ABI" ;;
-	esac
-
 	check_common_deps
 	find_ndk
 	[[ -f "$ANDROID_NDK/build/cmake/android.toolchain.cmake" ]] ||
 		die "invalid Android NDK: $ANDROID_NDK"
 
-	local subdir="$BUILD_DIR/$ABI"
-	local cmake_args=(
-		-S "$PROJECT_ROOT"
-		-B "$subdir"
-		-G Ninja
-		-DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"
-		-DANDROID_ABI="$ABI"
-		-DANDROID_PLATFORM="$ANDROID_PLATFORM"
-		-DCMAKE_BUILD_TYPE=Release
-	)
-	if [[ "$VERBOSE" == true ]]; then
-		cmake_args+=("--log-level=VERBOSE")
-	fi
-
-	info "Build runtime payloads ($ABI, $ANDROID_PLATFORM)"
-	cmake "${cmake_args[@]}"
-	cmake --build "$subdir" --target zygisk yukilinker yukizncore
-
 	mkdir -p "$OUT_DIR"
-	for lib in libzygisk.so libyukilinker.so libyukizncore.so; do
-		local src="$subdir/userspace/zygisk/core/$lib"
-		[[ -f "$src" ]] || die "runtime payload output missing: $src"
-		cp "$src" "$OUT_DIR/$lib"
-		strip_android_file --strip-all "$OUT_DIR/$lib"
-		chmod 0644 "$OUT_DIR/$lib"
-		info "Runtime: $OUT_DIR/$lib"
+	local target_abi suffix subdir src output
+	for target_abi in arm64-v8a armeabi-v7a; do
+		suffix="64"
+		[[ "$target_abi" == armeabi-v7a ]] && suffix="32"
+		subdir="$BUILD_DIR/$target_abi"
+		local cmake_args=(
+			-S "$PROJECT_ROOT"
+			-B "$subdir"
+			-G Ninja
+			-DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"
+			-DANDROID_ABI="$target_abi"
+			-DANDROID_PLATFORM="$ANDROID_PLATFORM"
+			-DCMAKE_BUILD_TYPE=Release
+		)
+		if [[ "$VERBOSE" == true ]]; then
+			cmake_args+=("--log-level=VERBOSE")
+		fi
+		info "Build runtime payloads ($target_abi, $ANDROID_PLATFORM)"
+		cmake "${cmake_args[@]}"
+		cmake --build "$subdir" --target zygisk yukilinker yukizncore
+		for lib in libzygisk libyukilinker libyukizncore; do
+			src="$subdir/userspace/zygisk/core/$lib$suffix.so"
+			output="$lib$suffix.so"
+			[[ -f "$src" ]] || die "runtime payload output missing: $src"
+			cp "$src" "$OUT_DIR/$output"
+			strip_android_file --strip-all "$OUT_DIR/$output"
+			chmod 0644 "$OUT_DIR/$output"
+		done
 	done
 }
 
+[[ "$ABI" == "arm64-v8a" ]] ||
+	die "standalone packages require an arm64-v8a device with optional ARM compat"
+
 stage_payloads() {
 	local lib
-	for lib in libzygisk.so libyukilinker.so libyukizncore.so; do
+	for lib in libzygisk64.so libzygisk32.so libyukilinker64.so \
+		libyukilinker32.so libyukizncore64.so libyukizncore32.so; do
 		if [[ -f "$OUT_DIR/$lib" ]]; then
 			cp "$OUT_DIR/$lib" "$PACKAGE_DIR/$lib"
 		else
@@ -418,7 +420,8 @@ package_module() {
 
 	[[ -d "$MODULE_TEMPLATE_DIR" ]] || die "missing module template: $MODULE_TEMPLATE_DIR"
 	[[ -f "$WEBUI_DIR/index.html" ]] || die "missing WebUI: $WEBUI_DIR"
-	[[ -f "$OUT_DIR/zygiskd" ]] || die "missing build/out/zygiskd"
+	[[ -f "$OUT_DIR/zygiskd64" && -f "$OUT_DIR/zygiskd32" ]] ||
+		die "missing dual-ABI daemon outputs"
 	check_staged_kernels
 
 	info "Stage module"
@@ -438,13 +441,15 @@ package_module() {
 		source="$(lkm_output_path "$target")"
 		cp "$source" "$PACKAGE_DIR/lkm/${target}_yukizygisk.ko"
 	done < <(kernel_targets)
-	cp "$OUT_DIR/zygiskd" "$PACKAGE_DIR/zygiskd"
+	cp "$OUT_DIR/zygiskd64" "$PACKAGE_DIR/zygiskd64"
+	cp "$OUT_DIR/zygiskd32" "$PACKAGE_DIR/zygiskd32"
 	stage_payloads
 
 	chmod 0644 "$PACKAGE_DIR/module.prop" "$PACKAGE_DIR"/lkm/*.ko \
 		"$PACKAGE_DIR"/lib*.so "$PACKAGE_DIR"/LICENSE* \
 		"$PACKAGE_DIR/NOTICE"
-	chmod 0755 "$PACKAGE_DIR/zygiskd" "$PACKAGE_DIR/post-fs-data.sh" \
+	chmod 0755 "$PACKAGE_DIR/zygiskd64" "$PACKAGE_DIR/zygiskd32" \
+		"$PACKAGE_DIR/post-fs-data.sh" \
 		"$PACKAGE_DIR/boot-completed.sh" "$PACKAGE_DIR/customize.sh" \
 		"$PACKAGE_DIR/action.sh" \
 		2>/dev/null || true

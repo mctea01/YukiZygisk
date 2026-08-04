@@ -12,7 +12,7 @@ LOG_FILE="/data/adb/yukizygisk/zygiskd.log"
 
 echo "YukiZygisk status"
 echo
-if ! "$MODDIR/zygiskd" --status 2>/dev/null; then
+if ! "$MODDIR/zygiskd64" --status 2>/dev/null; then
 	echo "zygiskd is unavailable"
 fi
 

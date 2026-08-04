@@ -59,9 +59,10 @@ random_cookie() {
 
 COOKIE="$(random_cookie)"
 
-chmod 0755 "$MODDIR/zygiskd" 2>/dev/null || true
+chmod 0755 "$MODDIR/zygiskd64" "$MODDIR/zygiskd32" 2>/dev/null || true
 
-for lib in libzygisk.so libyukilinker.so libyukizncore.so; do
+for lib in libzygisk64.so libzygisk32.so libyukilinker64.so \
+	libyukilinker32.so libyukizncore64.so libyukizncore32.so; do
 	if [ ! -f "$MODDIR/$lib" ]; then
 		log "missing payload $lib"
 		exit 0
@@ -73,6 +74,12 @@ for lib in libzygisk.so libyukilinker.so libyukizncore.so; do
 	mv "$LIB_DIR/$lib.tmp" "$LIB_DIR/$lib" 2>>"$LOG_FILE" || exit 0
 	chmod 0644 "$LIB_DIR/$lib" 2>/dev/null || true
 done
+
+if ! rm -f "$LIB_DIR/libzygisk.so" "$LIB_DIR/libyukilinker.so" \
+	"$LIB_DIR/libyukizncore.so" 2>>"$LOG_FILE"; then
+	log "remove legacy payloads failed"
+	exit 0
+fi
 
 if grep -q '^yukizygisk ' /proc/modules 2>/dev/null; then
 	log "yukizygisk.ko already loaded"
@@ -97,7 +104,7 @@ log "starting zygiskd"
 YUKIZYGISK_BOOTSTRAP_COOKIE_LO="$COOKIE" \
 YUKIZYGISK_CONFIG="$CONFIG_FILE" \
 YUKIZYGISK_MODULES_DIR="$MODULES_DIR" \
-"$MODDIR/zygiskd" \
+"$MODDIR/zygiskd64" \
 	--bootstrap-cookie-lo "$COOKIE" \
 	--config "$CONFIG_FILE" \
 	--modules-dir "$MODULES_DIR" \

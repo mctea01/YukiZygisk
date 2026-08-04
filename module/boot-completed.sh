@@ -18,7 +18,7 @@ log() {
 	echo "boot-completed: $*" >>"$LOG_FILE"
 }
 
-if "$MODDIR/zygiskd" --check-status >>"$LOG_FILE" 2>&1; then
+if "$MODDIR/zygiskd64" --check-status >>"$LOG_FILE" 2>&1; then
 	log "zygiskd status ok"
 	exit 0
 fi

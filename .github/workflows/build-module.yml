@@ -70,10 +70,14 @@ jobs:
         with:
           name: yukizygisk-userspace-arm64-v8a
           path: |
-            build/out/zygiskd
-            build/out/libzygisk.so
-            build/out/libyukilinker.so
-            build/out/libyukizncore.so
+            build/out/zygiskd64
+            build/out/zygiskd32
+            build/out/libzygisk64.so
+            build/out/libzygisk32.so
+            build/out/libyukilinker64.so
+            build/out/libyukilinker32.so
+            build/out/libyukizncore64.so
+            build/out/libyukizncore32.so
           if-no-files-found: error
 
   package:

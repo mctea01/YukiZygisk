@@ -9,6 +9,13 @@
 cmake_minimum_required(VERSION 3.22)
 project(YukiZygisk VERSION 0.1 LANGUAGES C CXX ASM)
 
+# Drop package artifacts left by releases from before filenames became
+# ABI-explicit. The build script also performs this cleanup before staging.
+file(REMOVE
+  "${CMAKE_SOURCE_DIR}/build/out/libzygisk.so"
+  "${CMAKE_SOURCE_DIR}/build/out/libyukilinker.so"
+  "${CMAKE_SOURCE_DIR}/build/out/libyukizncore.so")
+
 option(YZ_BUILD_ZYGISKD "Build the standalone YukiZygisk daemon" ON)
 option(YZ_BUILD_RUNTIME "Build the YukiZygisk runtime payloads" ON)
 

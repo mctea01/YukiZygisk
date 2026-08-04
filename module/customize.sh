@@ -27,14 +27,17 @@ if [ ! -f "$KERNEL_MODULE" ]; then
 	SUPPORTED_KMIS="$(yz_list_supported_kmis "$MODPATH" | tr '\n' ' ')"
 	abort "! Package has no module for $KMI (available: ${SUPPORTED_KMIS:-none})"
 fi
-[ -f "$MODPATH/zygiskd" ] || abort "! Missing zygiskd"
-for lib in libzygisk.so libyukilinker.so libyukizncore.so; do
+[ -f "$MODPATH/zygiskd64" ] || abort "! Missing zygiskd64"
+[ -f "$MODPATH/zygiskd32" ] || abort "! Missing zygiskd32"
+for lib in libzygisk64.so libzygisk32.so libyukilinker64.so \
+	libyukilinker32.so libyukizncore64.so libyukizncore32.so; do
 	[ -f "$MODPATH/$lib" ] || abort "! Missing $lib"
 done
 
 chmod 0644 "$MODPATH"/lkm/*.ko "$MODPATH/common.sh"
 chmod 0644 "$MODPATH"/lib*.so
-chmod 0755 "$MODPATH/zygiskd" "$MODPATH/post-fs-data.sh" \
+chmod 0755 "$MODPATH/zygiskd64" "$MODPATH/zygiskd32" \
+	"$MODPATH/post-fs-data.sh" \
 	"$MODPATH/boot-completed.sh" "$MODPATH/action.sh"
 
 BASE_DIR="/data/adb/yukizygisk"
