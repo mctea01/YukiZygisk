@@ -10,8 +10,7 @@ import { exec, hasKernelSU } from "./assets/kernelsu.js";
 
 export const PATHS = {
   MODULE: "/data/adb/modules/yukizygisk",
-  BINARY64: "/data/adb/modules/yukizygisk/zygiskd64",
-  BINARY32: "/data/adb/modules/yukizygisk/zygiskd32",
+  CONTROL: "/data/adb/modules/yukizygisk/yzctl",
   CONFIG: "/data/adb/yukizygisk/yzconfig.json",
 };
 
@@ -24,7 +23,6 @@ export const DEFAULT_CONFIG = {
 export const DEFAULT_STATUS = {
   available: false,
   kernel_alive: false,
-  daemon_pid: 0,
   abi: "arm64-v8a",
   root_impl: "unknown",
   root_mask: 0,
@@ -130,7 +128,6 @@ const mockState = {
   },
   status: normalizeStatus({
     kernel_alive: true,
-    daemon_pid: 842,
     abi: "arm64-v8a",
     root_impl: "kernelsu-redirect",
     root_mask: 3,
@@ -198,96 +195,28 @@ const mockApi = {
   },
 };
 
-function mergeBy(items, keyOf, merge = (_current, incoming) => incoming) {
-  const result = new Map();
-  for (const item of items) {
-    const key = keyOf(item);
-    result.set(key, result.has(key) ? merge(result.get(key), item) : item);
-  }
-  return [...result.values()];
-}
-
-function mergeRuntimeState(first, second) {
-  const known = new Set(["crashed", "failed", "injected", "unsupported32"]);
-  const a = known.has(first) ? first : "failed";
-  const b = known.has(second) ? second : "failed";
-  if (a === "crashed" || b === "crashed")
-    return "crashed";
-  if (a === "failed" || b === "failed")
-    return "failed";
-  if (a === "injected" || b === "injected")
-    return "injected";
-  return "unsupported32";
-}
-
-function mergeStatuses(primary, secondary) {
-  if (!primary)
-    return secondary;
-  if (!secondary)
-    return primary;
-  const statuses = [primary, secondary];
-  return normalizeStatus({
-    ...primary,
-    available: primary.available || secondary.available,
-    kernel_alive: primary.kernel_alive || secondary.kernel_alive,
-    abi: [...new Set(statuses.map((item) => item.abi).filter(Boolean))].join(" + "),
-    count: Number(primary.count || 0) + Number(secondary.count || 0),
-    safe_mode: primary.safe_mode || secondary.safe_mode,
-    zygote_crashes: Math.max(Number(primary.zygote_crashes || 0), Number(secondary.zygote_crashes || 0)),
-    recent: [...new Set([...primary.recent, ...secondary.recent])],
-    zygotes: mergeBy([...primary.zygotes, ...secondary.zygotes], (item) => `${item.pid}\0${item.name}\0${item.abi}`),
-    zygote_monitor: mergeBy([...primary.zygote_monitor, ...secondary.zygote_monitor], (item) => `${item.pid}\0${item.name}\0${item.abi}`),
-    modules: [...new Set([...primary.modules, ...secondary.modules])],
-    native_modules: mergeBy(
-      [...primary.native_modules, ...secondary.native_modules],
-      (item) => `${item.id}\0${item.target_type}\0${item.target}`,
-      (current, incoming) => ({
-        ...current,
-        companion: current.companion || incoming.companion,
-        state: mergeRuntimeState(current.state, incoming.state),
-      }),
-    ),
-    native_injections: mergeBy(
-      [...primary.native_injections, ...secondary.native_injections],
-      (item) => `${item.pid}\0${item.process}\0${item.module}\0${item.target_type}\0${item.target}\0${item.abi}`,
-      (current, incoming) => ({
-        ...current,
-        companion: current.companion || incoming.companion,
-        state: mergeRuntimeState(current.state, incoming.state),
-      }),
-    ),
-  });
-}
-
-async function queryStatus(binary) {
-  const result = await exec(`'${shellEscape(binary)}' --status`);
+async function queryStatus() {
+  const result = await exec(`'${shellEscape(PATHS.CONTROL)}' status --json`);
   const text = output(result);
   if (result.errno !== 0 || !text)
-    return { status: null, error: text || `${binary} status unavailable` };
+    return { status: null, error: text || "kernel status unavailable" };
   try {
     return { status: normalizeStatus(JSON.parse(text)), error: "" };
   } catch (error) {
-    return { status: null, error: `invalid status JSON from ${binary}: ${error.message}` };
+    return { status: null, error: `invalid status JSON from yzctl: ${error.message}` };
   }
 }
 
-async function reloadDaemons() {
-  const results = await Promise.all([
-    exec(`'${shellEscape(PATHS.BINARY64)}' --reload`),
-    exec(`'${shellEscape(PATHS.BINARY32)}' --reload`),
-  ]);
-  if (results.every((result) => result.errno !== 0))
-    throw new Error(results.map(output).filter(Boolean).join("; ") || "zygiskd reload failed");
+async function reloadRuntime() {
+  const result = await exec(`'${shellEscape(PATHS.CONTROL)}' reload`);
+  if (result.errno !== 0)
+    throw new Error(output(result) || "kernel reload failed");
 }
 
 const realApi = {
   async getStatus() {
-    const [primary, secondary] = await Promise.all([
-      queryStatus(PATHS.BINARY64),
-      queryStatus(PATHS.BINARY32),
-    ]);
-    const status = mergeStatuses(primary.status, secondary.status);
-    return status || normalizeStatus({ error: [primary.error, secondary.error].filter(Boolean).join("; ") });
+    const result = await queryStatus();
+    return result.status || normalizeStatus({ error: result.error });
   },
 
   async loadConfig() {
@@ -303,12 +232,12 @@ const realApi = {
 
   async saveConfig(config) {
     const normalized = await writeConfig(config);
-    await reloadDaemons();
+    await reloadRuntime();
     return normalized;
   },
 
   async reload() {
-    await reloadDaemons();
+    await reloadRuntime();
     return true;
   },
 

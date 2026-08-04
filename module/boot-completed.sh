@@ -18,12 +18,12 @@ log() {
 	echo "boot-completed: $*" >>"$LOG_FILE"
 }
 
-if "$MODDIR/zygiskd64" --check-status >>"$LOG_FILE" 2>&1; then
-	log "zygiskd status ok"
+if "$MODDIR/yzctl" status --json >/dev/null 2>>"$LOG_FILE"; then
+	log "kernel control status ok"
 	exit 0
 fi
 
-log "zygiskd status unavailable; unloading yukizygisk.ko"
+log "kernel control unavailable; unloading yukizygisk.ko"
 if ! grep -q '^yukizygisk ' /proc/modules 2>/dev/null; then
 	log "yukizygisk.ko already absent"
 	exit 0

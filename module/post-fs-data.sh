@@ -59,7 +59,8 @@ random_cookie() {
 
 COOKIE="$(random_cookie)"
 
-chmod 0755 "$MODDIR/zygiskd64" "$MODDIR/zygiskd32" 2>/dev/null || true
+chmod 0755 "$MODDIR/zygiskd64" "$MODDIR/zygiskd32" "$MODDIR/yzctl" \
+	2>/dev/null || true
 
 for lib in libzygisk64.so libzygisk32.so libyukilinker64.so \
 	libyukilinker32.so libyukizncore64.so libyukizncore32.so; do
@@ -104,10 +105,6 @@ log "starting zygiskd"
 YUKIZYGISK_BOOTSTRAP_COOKIE_LO="$COOKIE" \
 YUKIZYGISK_CONFIG="$CONFIG_FILE" \
 YUKIZYGISK_MODULES_DIR="$MODULES_DIR" \
-"$MODDIR/zygiskd64" \
-	--bootstrap-cookie-lo "$COOKIE" \
-	--config "$CONFIG_FILE" \
-	--modules-dir "$MODULES_DIR" \
-	>>"$LOG_FILE" 2>&1 &
+"$MODDIR/zygiskd64" >>"$LOG_FILE" 2>&1 &
 
 exit 0

@@ -28,6 +28,7 @@ ANDROID_PLATFORM="android-29"
 ANDROID_NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
 SKIP_KERNEL=false
 SKIP_DAEMON=false
+SKIP_CTL=false
 SKIP_PAYLOADS=false
 KEEP_BUILD=false
 STRIP_ANDROID=true
@@ -49,7 +50,7 @@ usage() {
 YukiZygisk local build and module packager.
 
 Usage:
-  ./build.sh [package|kernel|daemon|payloads|clean] [options]
+  ./build.sh [package|kernel|daemon|ctl|payloads|clean] [options]
 
 Options:
   -k, --kmi KMI              Build/package one DDK target (default: .ddk-version)
@@ -59,6 +60,7 @@ Options:
       --ndk PATH             Android NDK path
       --skip-kernel          Reuse KMI-tagged modules in build/out/lkm
       --skip-daemon          Reuse build/out/zygiskd64 and zygiskd32
+      --skip-ctl             Reuse build/out/yzctl
       --skip-payloads        Reuse dual-ABI build/out/lib*.so payloads
       --keep-build           Keep intermediate build directories
       --no-strip             Keep debug info in Android artifacts
@@ -95,6 +97,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--skip-daemon)
 		SKIP_DAEMON=true
+		shift
+		;;
+	--skip-ctl)
+		SKIP_CTL=true
 		shift
 		;;
 	--skip-payloads)
@@ -399,6 +405,43 @@ build_payloads() {
 	done
 }
 
+build_ctl() {
+	if [[ "$SKIP_CTL" == true ]]; then
+		[[ -f "$OUT_DIR/yzctl" ]] ||
+			die "--skip-ctl requested but build/out/yzctl is missing"
+		info "Skip yzctl build"
+		return
+	fi
+
+	check_common_deps
+	find_ndk
+	[[ -f "$ANDROID_NDK/build/cmake/android.toolchain.cmake" ]] ||
+		die "invalid Android NDK: $ANDROID_NDK"
+
+	mkdir -p "$OUT_DIR"
+	local subdir="$BUILD_DIR/arm64-v8a"
+	local cmake_args=(
+		-S "$PROJECT_ROOT"
+		-B "$subdir"
+		-G Ninja
+		-DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"
+		-DANDROID_ABI=arm64-v8a
+		-DANDROID_PLATFORM="$ANDROID_PLATFORM"
+		-DCMAKE_BUILD_TYPE=Release
+	)
+	if [[ "$VERBOSE" == true ]]; then
+		cmake_args+=("--log-level=VERBOSE")
+	fi
+	info "Build yzctl (arm64-v8a, $ANDROID_PLATFORM)"
+	cmake "${cmake_args[@]}"
+	cmake --build "$subdir" --target yzctl
+	local bin="$subdir/userspace/yzctl/yzctl"
+	[[ -f "$bin" ]] || die "yzctl missing: $bin"
+	cp "$bin" "$OUT_DIR/yzctl"
+	strip_android_file --strip-all "$OUT_DIR/yzctl"
+	chmod 0755 "$OUT_DIR/yzctl"
+}
+
 [[ "$ABI" == "arm64-v8a" ]] ||
 	die "standalone packages require an arm64-v8a device with optional ARM compat"
 
@@ -422,6 +465,7 @@ package_module() {
 	[[ -f "$WEBUI_DIR/index.html" ]] || die "missing WebUI: $WEBUI_DIR"
 	[[ -f "$OUT_DIR/zygiskd64" && -f "$OUT_DIR/zygiskd32" ]] ||
 		die "missing dual-ABI daemon outputs"
+	[[ -f "$OUT_DIR/yzctl" ]] || die "missing yzctl output"
 	check_staged_kernels
 
 	info "Stage module"
@@ -443,12 +487,14 @@ package_module() {
 	done < <(kernel_targets)
 	cp "$OUT_DIR/zygiskd64" "$PACKAGE_DIR/zygiskd64"
 	cp "$OUT_DIR/zygiskd32" "$PACKAGE_DIR/zygiskd32"
+	cp "$OUT_DIR/yzctl" "$PACKAGE_DIR/yzctl"
 	stage_payloads
 
 	chmod 0644 "$PACKAGE_DIR/module.prop" "$PACKAGE_DIR"/lkm/*.ko \
 		"$PACKAGE_DIR"/lib*.so "$PACKAGE_DIR"/LICENSE* \
 		"$PACKAGE_DIR/NOTICE"
 	chmod 0755 "$PACKAGE_DIR/zygiskd64" "$PACKAGE_DIR/zygiskd32" \
+		"$PACKAGE_DIR/yzctl" \
 		"$PACKAGE_DIR/post-fs-data.sh" \
 		"$PACKAGE_DIR/boot-completed.sh" "$PACKAGE_DIR/customize.sh" \
 		"$PACKAGE_DIR/action.sh" \
@@ -487,12 +533,16 @@ kernel)
 daemon)
 	build_daemon
 	;;
+ctl)
+	build_ctl
+	;;
 payloads)
 	build_payloads
 	;;
 package)
 	build_kernel
 	build_daemon
+	build_ctl
 	build_payloads
 	package_module
 	if [[ "$KEEP_BUILD" != true ]]; then

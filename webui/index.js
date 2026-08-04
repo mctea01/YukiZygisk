@@ -215,7 +215,7 @@ function renderStatus() {
         <div class="eyebrow"><span class="status-dot"></span>${escapeHtml(t("status.injection"))} · ${escapeHtml(state.status.abi || "arm64-v8a")}</div>
         <h1>${escapeHtml(presentation.title)}</h1>
         <p>${escapeHtml(presentation.description)}</p>
-        <div class="hero-meta"><span>${escapeHtml(t("status.lastUpdate"))} ${escapeHtml(state.lastUpdated || "—")}</span><span>PID ${escapeHtml(state.status.daemon_pid || "—")}</span></div>
+        <div class="hero-meta"><span>${escapeHtml(t("status.lastUpdate"))} ${escapeHtml(state.lastUpdated || "—")}</span></div>
       </div>
       <div class="hero-actions"><button class="button secondary" data-action="reload">${icon("reload")} ${escapeHtml(t("common.reload"))}</button></div>
     </section>
@@ -246,7 +246,6 @@ function renderStatus() {
         ${infoItem(t("status.denylistSource"), policySourceLabel())}
         ${state.status.root_policy_source !== "kernel" ? infoItem(t("status.policyCache"), t(state.status.root_policy_cache_ready ? "policy.ready" : "policy.pending")) : ""}
         ${infoItem(t("common.abi"), state.status.abi || "—")}
-        ${infoItem(t("status.daemonPid"), state.status.daemon_pid || "—")}
       </dl>
     </section>
 

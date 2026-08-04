@@ -18,7 +18,7 @@ matrix and assembles one release module package containing every KO.
 
 This is a buildable extraction checkpoint, not a complete runtime replacement
 for the YukiSU-integrated module yet. See the source inventory for the
-remaining daemon/userspace control, payload staging, and host-backend runtime
+remaining daemon mediation, payload staging, and host-backend runtime
 validation work. The kernel-side setresuid tracepoint monitor, SELinux policy
 adapter, and mount cleanup adapter are present in the standalone LKM, but still
 need device-side validation before they can be treated as runtime parity.
@@ -26,12 +26,14 @@ need device-side validation before they can be treated as runtime parity.
 The standalone control path no longer creates `/dev/yukizygisk`. The LKM arms a
 one-shot `prctl` bootstrap when loaded with a per-boot cookie; `zygiskd` claims
 an anonymous control fd immediately after startup and then reuses the
-`YZ_IOCTL_*` command surface on that fd.
+`YZ_IOCTL_*` command surface on that fd. Root control clients use the separate
+`yzctl` binary, which requests an independently authenticated anonymous control
+fd and talks to the same kernel ioctl surface without going through zygiskd.
 
 If zygiskd never claims the bootstrap fd, the kernel guard checks for zygote
 service sockets after a short delay. Once service startup is visible, the guard
-clears the bootstrap cookie, removes the temporary `prctl` hook, and requests a
-best-effort self-unload through `toybox rmmod yukizygisk`.
+clears the bootstrap cookie, disables new control sessions, and fails closed.
+The later `boot-completed` health check performs the external module unload.
 
 The standalone design remains root-implementation agnostic at its internal
 boundaries, but its current admission policy is deliberately narrow. Module
@@ -55,6 +57,7 @@ The standalone control ABI is `YZ_IOCTL_*` with ioctl magic `'Y'` only. It does
 not accept the integrated YukiSU/YukiZygisk `KSU_IOCTL_YZ_*`/`'K'` ABI.
 
 The default package is a normal module containing `zygiskd64`, `zygiskd32`,
+the arm64 `yzctl` control client,
 paired `libzygisk64.so`/`libzygisk32.so`,
 `libyukilinker64.so`/`libyukilinker32.so`, and
 `libyukizncore64.so`/`libyukizncore32.so` payloads, plus a KMI-specific LKM
@@ -73,7 +76,9 @@ up early-native injection by default; that capability can remain a future
 optional host backend rather than the baseline standalone path.
 
 The packaged WebUI has three pages: device/injection status, configuration,
-and about/credits. It does not own a separately configured denylist. The
+and about/credits. It reads kernel-owned runtime state and requests reloads
+through `yzctl`; zygiskd is not a manager or user control interface. The WebUI
+does not own a separately configured denylist. The
 preferred path asks the accepted KernelSU or KernelPatch backend through a
 CFI-safe kernel callable. If that callable cannot be resolved, the kernel asks
 zygiskd for a refresh over netlink: zygiskd uses KernelSU's userspace

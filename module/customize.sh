@@ -29,6 +29,7 @@ if [ ! -f "$KERNEL_MODULE" ]; then
 fi
 [ -f "$MODPATH/zygiskd64" ] || abort "! Missing zygiskd64"
 [ -f "$MODPATH/zygiskd32" ] || abort "! Missing zygiskd32"
+[ -f "$MODPATH/yzctl" ] || abort "! Missing yzctl"
 for lib in libzygisk64.so libzygisk32.so libyukilinker64.so \
 	libyukilinker32.so libyukizncore64.so libyukizncore32.so; do
 	[ -f "$MODPATH/$lib" ] || abort "! Missing $lib"
@@ -36,7 +37,7 @@ done
 
 chmod 0644 "$MODPATH"/lkm/*.ko "$MODPATH/common.sh"
 chmod 0644 "$MODPATH"/lib*.so
-chmod 0755 "$MODPATH/zygiskd64" "$MODPATH/zygiskd32" \
+chmod 0755 "$MODPATH/zygiskd64" "$MODPATH/zygiskd32" "$MODPATH/yzctl" \
 	"$MODPATH/post-fs-data.sh" \
 	"$MODPATH/boot-completed.sh" "$MODPATH/action.sh"
 

@@ -17,6 +17,7 @@ file(REMOVE
   "${CMAKE_SOURCE_DIR}/build/out/libyukizncore.so")
 
 option(YZ_BUILD_ZYGISKD "Build the standalone YukiZygisk daemon" ON)
+option(YZ_BUILD_YZCTL "Build the standalone YukiZygisk control client" ON)
 option(YZ_BUILD_RUNTIME "Build the YukiZygisk runtime payloads" ON)
 
 if(YZ_BUILD_RUNTIME)
@@ -24,4 +25,7 @@ if(YZ_BUILD_RUNTIME)
 endif()
 if(YZ_BUILD_ZYGISKD)
   add_subdirectory(userspace/zygisk/daemon)
+endif()
+if(YZ_BUILD_YZCTL)
+  add_subdirectory(userspace/yzctl)
 endif()
