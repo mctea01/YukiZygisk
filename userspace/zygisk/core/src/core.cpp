@@ -1170,8 +1170,9 @@ extern "C" __attribute__((visibility("hidden"))) void *__dso_handle;
 static inline void yz_finalize_self_dso() { __cxa_finalize(&__dso_handle); }
 
 void zygisk_self_destruct(JNIEnv *env, bool isolated, bool revert_mounts) {
-  bool can_unmap = zygisk_specialize_fully_inline_hooked();
-  zygisk_self_unhook(env);
+  const bool fully_inline_hooked = zygisk_specialize_fully_inline_hooked();
+  const bool hooks_removed = zygisk_self_unhook(env);
+  bool can_unmap = fully_inline_hooked && hooks_removed;
   yz_drop_runtime_header_pages();
   uintptr_t cbase = 0;
   size_t csize = 0;
@@ -1186,8 +1187,10 @@ void zygisk_self_destruct(JNIEnv *env, bool isolated, bool revert_mounts) {
         yz_revert_self_mounts();
     }
   }
-  if (!can_unmap)
+  if (!fully_inline_hooked)
     LOGE("self-unmap unavailable: specialize used RegisterNatives fallback");
+  if (!hooks_removed)
+    LOGE("self-unmap unavailable: hook restore failed");
   if (!have_range)
     LOGE("self-unmap unavailable: core image bounds are missing");
   if (can_unmap && yukilinker::has_active_tls()) {
