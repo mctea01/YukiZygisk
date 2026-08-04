@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/fdtable.h>
 #include <linux/fs.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/pid.h>
@@ -22,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/task_work.h>
 #include <linux/uaccess.h>
+#include <linux/vmalloc.h>
 
 #include "core/control.h"
 #include "feature/zygote_ctl.h"
@@ -169,6 +171,49 @@ static int yz_ioctl_get_zygote_variants(void __user *arg)
 	if (copy_to_user(arg, &cmd, sizeof(cmd)))
 		return -EFAULT;
 	return 0;
+}
+
+static int yz_ioctl_get_runtime(void __user *arg)
+{
+	struct yz_runtime_query_cmd cmd;
+	struct yz_runtime_record *entries = NULL;
+	void __user *user_entries;
+	u32 capacity;
+	int ret;
+
+	if (copy_from_user(&cmd, arg, sizeof(cmd)))
+		return -EFAULT;
+	if (cmd.capacity > YZ_RUNTIME_RECORD_MAX)
+		return -EINVAL;
+	capacity = cmd.capacity;
+	user_entries = u64_to_user_ptr(cmd.entries);
+	if (capacity && !user_entries)
+		return -EINVAL;
+	if (capacity) {
+		entries = kvcalloc(capacity, sizeof(*entries), GFP_KERNEL);
+		if (!entries)
+			return -ENOMEM;
+	}
+
+	cmd.count = 0;
+	ret = yz_zygote_probe_get_runtime(entries, capacity, &cmd);
+	if (!ret && cmd.count &&
+	    copy_to_user(user_entries, entries, cmd.count * sizeof(*entries)))
+		ret = -EFAULT;
+	if (!ret && copy_to_user(arg, &cmd, sizeof(cmd)))
+		ret = -EFAULT;
+	kvfree(entries);
+	return ret;
+}
+
+static int yz_ioctl_report_runtime(void __user *arg)
+{
+	struct yz_runtime_report_cmd cmd;
+
+	if (copy_from_user(&cmd, arg, sizeof(cmd)))
+		return -EFAULT;
+	cmd.module_id[sizeof(cmd.module_id) - 1] = '\0';
+	return yz_zygote_probe_report_runtime(&cmd);
 }
 
 static int yz_ioctl_get_root_status(void __user *arg)
@@ -451,6 +496,10 @@ static long yukizygisk_ioctl(struct file *file, unsigned int request,
 		return yz_host_prepare_runtime_policy();
 	case YZ_IOCTL_ALLOW_MODULE_LOAD_POLICY:
 		return yz_ioctl_allow_module_load_policy(uarg);
+	case YZ_IOCTL_GET_RUNTIME:
+		return yz_ioctl_get_runtime(uarg);
+	case YZ_IOCTL_REPORT_RUNTIME:
+		return yz_ioctl_report_runtime(uarg);
 	default:
 		return -ENOTTY;
 	}
