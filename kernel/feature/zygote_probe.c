@@ -8,46 +8,46 @@
  * Author: Anatdx
  */
 
+#include <asm/cacheflush.h>
+#include <linux/auxvec.h>
 #include <linux/binfmts.h>
 #include <linux/compat.h>
 #include <linux/compiler.h>
 #include <linux/cred.h>
-#include <linux/printk.h>
-#include <linux/sched.h>
-#include <linux/sched/task_stack.h>
-#include <linux/sched/task.h>
-#include <linux/rcupdate.h>
-#include <linux/fs.h>
-#include <linux/string.h>
-#include <linux/slab.h>
-#include <linux/task_work.h>
-#include <linux/ptrace.h>
-#include <linux/mm.h>
 #include <linux/elf.h>
-#include <linux/auxvec.h>
-#include <linux/uaccess.h>
-#include <linux/mman.h>
 #include <linux/err.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
+#include <linux/fs.h>
 #include <linux/jiffies.h>
 #include <linux/list.h>
+#include <linux/mm.h>
+#include <linux/mman.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/printk.h>
 #include <linux/proc_fs.h>
+#include <linux/ptrace.h>
 #include <linux/random.h>
+#include <linux/rcupdate.h>
+#include <linux/sched.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/shmem_fs.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/syscalls.h>
+#include <linux/task_work.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/workqueue.h>
-#include <asm/cacheflush.h>
 
-#include "zygote_probe.h"
-#include "zygote_nl.h"
 #include "host/host.h"
 #include "host/runtime.h"
 #include "klog.h" // IWYU pragma: keep
 #include "uapi/yukizygisk.h"
+#include "zygote_nl.h"
+#include "zygote_probe.h"
 
 static const char app_process[] = "app_process";
 
@@ -74,9 +74,11 @@ MODULE_PARM_DESC(probe_lsm, "Enable the zygote bprm LSM injector");
 #define ZP_STUB_STR_OFF 0xc00
 #define ZP_STUB_ENTRY_STR_OFF 0xd00
 
-/* linker64 symbol offsets. */
+/* Dynamic linker symbol offsets, split by userspace ABI. */
 static u64 zp_dlopen_off;
 static u64 zp_dlsym_off;
+static u64 zp_dlopen32_off;
+static u64 zp_dlsym32_off;
 
 void yz_zygote_probe_set_dlopen_off(u64 dlopen_off, u64 dlsym_off)
 {
@@ -84,6 +86,14 @@ void yz_zygote_probe_set_dlopen_off(u64 dlopen_off, u64 dlsym_off)
 	zp_dlsym_off = dlsym_off;
 	pr_info("zygote_probe: dlopen=0x%llx dlsym=0x%llx set\n", dlopen_off,
 		dlsym_off);
+}
+
+void yz_zygote_probe_set_dlopen32_off(u64 dlopen_off, u64 dlsym_off)
+{
+	zp_dlopen32_off = dlopen_off;
+	zp_dlsym32_off = dlsym_off;
+	pr_info("zygote_probe: compat dlopen=0x%llx dlsym=0x%llx set\n",
+		dlopen_off, dlsym_off);
 }
 
 static bool zp_yukilinker_enabled;
@@ -101,6 +111,8 @@ static bool zp_early_native_enabled;
 static bool zp_early_native_legacy_paths;
 static u64 zp_early_dlopen_off;
 static u64 zp_early_dlsym_off;
+static u64 zp_early_dlopen32_off;
+static u64 zp_early_dlsym32_off;
 static unsigned long zp_early_native_retry_deadline;
 static bool zp_early_native_missing_logged;
 
@@ -293,9 +305,9 @@ int yz_zygote_probe_restore_native_policy(pid_t tgid)
 	return zp_restore_module_policy(tgid);
 }
 
-static bool zp_module_policy_same(
-	const struct zp_module_policy_holder *holder, pid_t tgid,
-	const struct yz_file_load_policy *state)
+static bool zp_module_policy_same(const struct zp_module_policy_holder *holder,
+				  pid_t tgid,
+				  const struct yz_file_load_policy *state)
 {
 	return holder->pending && holder->tgid == tgid &&
 	       holder->state.src_type == state->src_type &&
@@ -322,8 +334,7 @@ static void zp_module_policy_timeout(struct work_struct *work)
 		return;
 
 	pr_info("zygote_probe: module policy timeout pid=%d src=%u tgt=%u\n",
-		holder->tgid, holder->state.src_type,
-		holder->state.tgt_type);
+		holder->tgid, holder->state.src_type, holder->state.tgt_type);
 	zp_restore_native_policy_state(&holder->state);
 	kfree(holder);
 }
@@ -417,7 +428,8 @@ static int zp_restore_module_policy(pid_t tgid)
 		n++;
 	}
 	if (n)
-		pr_info("zygote_probe: module policy restore pid=%d entries=%d ret=%d\n",
+		pr_info("zygote_probe: module policy restore pid=%d entries=%d "
+			"ret=%d\n",
 			tgid, n, first_error);
 	return first_error;
 }
@@ -481,7 +493,7 @@ typedef struct linux_binprm zp_bprm_arg_t;
 
 static void my_bprm_committed_creds(zp_bprm_arg_t *bprm);
 static struct yz_host_lsm_hook zygote_probe_hook = YZ_HOST_LSM_HOOK_INIT(
-	bprm_committed_creds, ZP_BPRM_HOOK_TARGET, my_bprm_committed_creds, 0);
+    bprm_committed_creds, ZP_BPRM_HOOK_TARGET, my_bprm_committed_creds, 0);
 
 typedef void (*bprm_committed_creds_fn)(zp_bprm_arg_t *bprm);
 
@@ -629,8 +641,7 @@ int yz_zygote_probe_get_variants(struct yz_zygote_variants_cmd *cmd)
 
 	memset(cmd, 0, sizeof(*cmd));
 	spin_lock_irqsave(&zp_safemode_lock, flags);
-	for (i = 0; i < ZP_ZYGOTE_GUARD_MAX &&
-		    count < YZ_ZYGOTE_VARIANT_MAX;
+	for (i = 0; i < ZP_ZYGOTE_GUARD_MAX && count < YZ_ZYGOTE_VARIANT_MAX;
 	     i++) {
 		struct zp_zygote_guard *guard = &zp_zygote_guards[i];
 		struct yz_zygote_variant *entry;
@@ -757,41 +768,71 @@ static bool zp_parse_zygote_args(struct mm_struct *mm, char *socket_name,
 				     arg + sizeof(socket_prefix) - 1);
 	}
 
-	if (found && socket_name_len && socket_name[0] == '\0')
-		zp_copy_name(socket_name, socket_name_len, "zygote");
-	return found;
+        if (found && socket_name_len && socket_name[0] == '\0')
+          zp_copy_name(socket_name, socket_name_len, "zygote");
+        return found;
 }
 
-#define ZP_LOADER_PATH "/data/adb/yukizygisk/lib/libyukilinker.so"
-#define ZP_CORE_PATH "/data/adb/yukizygisk/lib/libzygisk.so"
-#define ZP_NATIVE_CORE_PATH "/data/adb/yukizygisk/lib/libyukizncore.so"
+#define ZP_LOADER_NAME64 "libyukilinker64.so"
+#define ZP_LOADER_NAME32 "libyukilinker32.so"
+#define ZP_CORE_NAME64 "libzygisk64.so"
+#define ZP_CORE_NAME32 "libzygisk32.so"
+#define ZP_NATIVE_CORE_NAME64 "libyukizncore64.so"
+#define ZP_NATIVE_CORE_NAME32 "libyukizncore32.so"
+#define ZP_LOADER_PATH "/data/adb/yukizygisk/lib/" ZP_LOADER_NAME64
+#define ZP_LOADER32_PATH "/data/adb/yukizygisk/lib/" ZP_LOADER_NAME32
+#define ZP_CORE_PATH "/data/adb/yukizygisk/lib/" ZP_CORE_NAME64
+#define ZP_CORE32_PATH "/data/adb/yukizygisk/lib/" ZP_CORE_NAME32
+#define ZP_NATIVE_CORE_PATH "/data/adb/yukizygisk/lib/" ZP_NATIVE_CORE_NAME64
+#define ZP_NATIVE_CORE32_PATH "/data/adb/yukizygisk/lib/" ZP_NATIVE_CORE_NAME32
 #define ZP_SYSTEM_LINKER64 "/system/bin/linker64"
-#define ZP_EARLY_MANIFEST_DEFAULT                                             \
-	"/metadata/yukizygisk/native_snapshot.bin"
-#define ZP_EARLY_MANIFEST_LEGACY                                              \
-	"/metadata/watchdog/ksu/yukizygisk/native_snapshot.bin"
-#define ZP_EARLY_LOADER_DEFAULT "/metadata/yukizygisk/libyukilinker.so"
-#define ZP_EARLY_LOADER_LEGACY                                                \
-	"/metadata/watchdog/ksu/yukizygisk/libyukilinker.so"
-#define ZP_EARLY_NATIVE_CORE_DEFAULT "/metadata/yukizygisk/libyukizncore.so"
-#define ZP_EARLY_NATIVE_CORE_LEGACY                                           \
-	"/metadata/watchdog/ksu/yukizygisk/libyukizncore.so"
+#define ZP_SYSTEM_LINKER32 "/system/bin/linker"
+#define ZP_EARLY_MANIFEST_DEFAULT "/metadata/yukizygisk/native_snapshot.bin"
+#define ZP_EARLY_MANIFEST_LEGACY                                               \
+  "/metadata/watchdog/ksu/yukizygisk/native_snapshot.bin"
+#define ZP_EARLY_LOADER_DEFAULT "/metadata/yukizygisk/" ZP_LOADER_NAME64
+#define ZP_EARLY_LOADER32_DEFAULT "/metadata/yukizygisk/" ZP_LOADER_NAME32
+#define ZP_EARLY_LOADER_LEGACY                                                 \
+  "/metadata/watchdog/ksu/yukizygisk/" ZP_LOADER_NAME64
+#define ZP_EARLY_LOADER32_LEGACY                                               \
+  "/metadata/watchdog/ksu/yukizygisk/" ZP_LOADER_NAME32
+#define ZP_EARLY_NATIVE_CORE_DEFAULT                                           \
+  "/metadata/yukizygisk/" ZP_NATIVE_CORE_NAME64
+#define ZP_EARLY_NATIVE_CORE_LEGACY                                            \
+  "/metadata/watchdog/ksu/yukizygisk/" ZP_NATIVE_CORE_NAME64
+#define ZP_EARLY_NATIVE_CORE32_DEFAULT                                         \
+  "/metadata/yukizygisk/" ZP_NATIVE_CORE_NAME32
+#define ZP_EARLY_NATIVE_CORE32_LEGACY                                          \
+  "/metadata/watchdog/ksu/yukizygisk/" ZP_NATIVE_CORE_NAME32
 #define ZP_VMA_NAME "memfd:"
 #define ZP_VMA_NAME_LEN sizeof(ZP_VMA_NAME)
-#define ZP_LOADER_MAX_SZ (8u << 20) /* sanity cap on a payload image */
+#define ZP_LOADER_MAX_SZ (8u << 20)  /* sanity cap on a payload image */
 #define ZP_DLEXT_USE_LIBRARY_FD 0x10 /* android_dlextinfo.flags bit */
 #define ZP_DLEXT_FORCE_LOAD 0x40
 
 /* bionic android_dlextinfo, LP64 subset. */
 struct zp_dlextinfo {
+  __u64 flags;
+  __u64 reserved_addr;
+  __u64 reserved_size;
+  __s32 relro_fd;
+  __s32 library_fd;
+  __s64 library_fd_offset;
+  __u64 library_namespace;
+};
+
+/* bionic android_dlextinfo, ARM EABI subset. */
+struct zp_compat_dlextinfo {
 	__u64 flags;
-	__u64 reserved_addr;
-	__u64 reserved_size;
+	__u32 reserved_addr;
+	__u32 reserved_size;
 	__s32 relro_fd;
 	__s32 library_fd;
 	__s64 library_fd_offset;
-	__u64 library_namespace;
+	__u32 library_namespace;
 };
+static_assert(offsetof(struct zp_compat_dlextinfo, library_fd) == 20);
+static_assert(sizeof(struct zp_compat_dlextinfo) == 40);
 
 static struct file *zp_open_first(const char *primary, const char *fallback,
 				  const char **chosen_path)
@@ -864,6 +905,9 @@ static bool zp_early_entry_valid(struct yz_early_native_entry *entry)
 	if (entry->target_type != YZ_NATIVE_TARGET_NAME &&
 	    entry->target_type != YZ_NATIVE_TARGET_PATH)
 		return false;
+	if (!(entry->flags &
+	      (YZ_EARLY_NATIVE_ENTRY_ABI32 | YZ_EARLY_NATIVE_ENTRY_ABI64)))
+		return false;
 	if (entry->module_id[0] == '\0' || entry->target[0] == '\0' ||
 	    entry->lib_path[0] == '\0')
 		return false;
@@ -877,8 +921,11 @@ static void zp_load_early_native_locked(void)
 	const char *path = NULL;
 	loff_t pos = 0;
 	enum zp_file_size_check linker_size_check = ZP_FILE_SIZE_MISMATCH;
+	enum zp_file_size_check linker32_size_check = ZP_FILE_SIZE_MISMATCH;
 	u64 linker_actual_size = 0;
+	u64 linker32_actual_size = 0;
 	long linker_open_err = 0;
+	long linker32_open_err = 0;
 	bool invalid;
 	u32 i;
 
@@ -889,6 +936,8 @@ static void zp_load_early_native_locked(void)
 	zp_early_native_count = 0;
 	zp_early_dlopen_off = 0;
 	zp_early_dlsym_off = 0;
+	zp_early_dlopen32_off = 0;
+	zp_early_dlsym32_off = 0;
 
 	file = zp_open_first(ZP_EARLY_MANIFEST_DEFAULT,
 			     ZP_EARLY_MANIFEST_LEGACY, &path);
@@ -918,35 +967,58 @@ static void zp_load_early_native_locked(void)
 		    path ?: "(unknown)");
 		goto out;
 	}
-	invalid = hdr.magic != YZ_EARLY_NATIVE_MAGIC ||
-		  hdr.version != YZ_EARLY_NATIVE_VERSION ||
-		  hdr.header_size != sizeof(hdr) ||
-		  hdr.entry_size != sizeof(struct yz_early_native_entry) ||
-		  hdr.count > YZ_NATIVE_TARGET_MAX ||
-		  !(hdr.flags & YZ_EARLY_NATIVE_FLAG_ENABLED) ||
-		  !hdr.dlopen_offset || !hdr.dlsym_offset;
-	if (!invalid) {
+	invalid =
+	    hdr.magic != YZ_EARLY_NATIVE_MAGIC ||
+	    hdr.version != YZ_EARLY_NATIVE_VERSION ||
+	    hdr.header_size != sizeof(hdr) ||
+	    hdr.entry_size != sizeof(struct yz_early_native_entry) ||
+	    hdr.count > YZ_NATIVE_TARGET_MAX ||
+	    !(hdr.flags & YZ_EARLY_NATIVE_FLAG_ENABLED) ||
+	    (hdr.count && !(hdr.flags & (YZ_EARLY_NATIVE_FLAG_ABI32 |
+					 YZ_EARLY_NATIVE_FLAG_ABI64))) ||
+	    ((hdr.flags & YZ_EARLY_NATIVE_FLAG_ABI64) &&
+	     (!hdr.dlopen_offset || !hdr.dlsym_offset || !hdr.linker_size)) ||
+	    ((hdr.flags & YZ_EARLY_NATIVE_FLAG_ABI32) &&
+	     (!hdr.dlopen32_offset || !hdr.dlsym32_offset ||
+	      !hdr.linker32_size));
+	if (!invalid && (hdr.flags & YZ_EARLY_NATIVE_FLAG_ABI64)) {
 		linker_size_check =
 		    zp_check_file_size(ZP_SYSTEM_LINKER64, hdr.linker_size,
 				       &linker_actual_size, &linker_open_err);
 		invalid = linker_size_check == ZP_FILE_SIZE_MISMATCH;
 	}
+	if (!invalid && (hdr.flags & YZ_EARLY_NATIVE_FLAG_ABI32)) {
+		linker32_size_check = zp_check_file_size(
+		    ZP_SYSTEM_LINKER32, hdr.linker32_size,
+		    &linker32_actual_size, &linker32_open_err);
+		invalid = linker32_size_check == ZP_FILE_SIZE_MISMATCH;
+	}
 	if (invalid) {
 		pr_info("zygote_probe: early native snapshot invalid %s "
 			"magic=0x%x ver=%u h=%u/%zu e=%u/%zu flags=0x%x "
 			"count=%u dlopen=0x%llx dlsym=0x%llx "
-			"linker_size=%llu actual=%llu err=%ld\n",
+			"linker_size=%llu actual=%llu err=%ld "
+			"dlopen32=0x%llx dlsym32=0x%llx "
+			"linker32_size=%llu actual32=%llu err32=%ld\n",
 			path ?: "(unknown)", hdr.magic, hdr.version,
 			hdr.header_size, sizeof(hdr), hdr.entry_size,
 			sizeof(struct yz_early_native_entry), hdr.flags,
 			hdr.count, hdr.dlopen_offset, hdr.dlsym_offset,
-			hdr.linker_size, linker_actual_size, linker_open_err);
+			hdr.linker_size, linker_actual_size, linker_open_err,
+			hdr.dlopen32_offset, hdr.dlsym32_offset,
+			hdr.linker32_size, linker32_actual_size,
+			linker32_open_err);
 		goto out;
 	}
 	if (linker_size_check == ZP_FILE_SIZE_UNAVAILABLE)
 		pr_info("zygote_probe: early native linker size unavailable "
 			"%s want=%llu err=%ld, using snapshot\n",
 			ZP_SYSTEM_LINKER64, hdr.linker_size, linker_open_err);
+	if (linker32_size_check == ZP_FILE_SIZE_UNAVAILABLE)
+		pr_info("zygote_probe: early native compat linker size "
+			"unavailable %s want=%llu err=%ld, using snapshot\n",
+			ZP_SYSTEM_LINKER32, hdr.linker32_size,
+			linker32_open_err);
 
 	for (i = 0; i < hdr.count; i++) {
 		struct yz_early_native_entry entry;
@@ -960,14 +1032,18 @@ static void zp_load_early_native_locked(void)
 
 	zp_early_dlopen_off = hdr.dlopen_offset;
 	zp_early_dlsym_off = hdr.dlsym_offset;
+	zp_early_dlopen32_off = hdr.dlopen32_offset;
+	zp_early_dlsym32_off = hdr.dlsym32_offset;
 	zp_early_native_legacy_paths =
 	    path && !strcmp(path, ZP_EARLY_MANIFEST_LEGACY);
 	zp_early_native_enabled = zp_early_native_count > 0;
 	if (zp_early_native_enabled)
 		pr_info("zygote_probe: early native snapshot %s count=%u "
-			"dlopen=0x%llx dlsym=0x%llx\n",
+			"dlopen=0x%llx dlsym=0x%llx dlopen32=0x%llx "
+			"dlsym32=0x%llx\n",
 			path ?: "(unknown)", zp_early_native_count,
-			zp_early_dlopen_off, zp_early_dlsym_off);
+			zp_early_dlopen_off, zp_early_dlsym_off,
+			zp_early_dlopen32_off, zp_early_dlsym32_off);
 out:
 	yz_file_close(file, NULL);
 }
@@ -1005,6 +1081,10 @@ static bool zp_match_early_native_target(const char *filename, char *label,
 			zp_dlopen_off = zp_early_dlopen_off;
 		if (!zp_dlsym_off)
 			zp_dlsym_off = zp_early_dlsym_off;
+		if (!zp_dlopen32_off)
+			zp_dlopen32_off = zp_early_dlopen32_off;
+		if (!zp_dlsym32_off)
+			zp_dlsym32_off = zp_early_dlsym32_off;
 		zp_copy_name(label, label_len, entry->target);
 		if (target_type)
 			*target_type = entry->target_type;
@@ -1016,14 +1096,21 @@ out:
 	return matched;
 }
 
-static const char *zp_early_loader_path(void)
+static const char *zp_early_loader_path(bool compat)
 {
+	if (compat)
+		return zp_early_native_legacy_paths ? ZP_EARLY_LOADER32_LEGACY
+						    : ZP_EARLY_LOADER32_DEFAULT;
 	return zp_early_native_legacy_paths ? ZP_EARLY_LOADER_LEGACY
 					    : ZP_EARLY_LOADER_DEFAULT;
 }
 
-static const char *zp_early_native_core_path(void)
+static const char *zp_early_native_core_path(bool compat)
 {
+	if (compat)
+		return zp_early_native_legacy_paths
+			   ? ZP_EARLY_NATIVE_CORE32_LEGACY
+			   : ZP_EARLY_NATIVE_CORE32_DEFAULT;
 	return zp_early_native_legacy_paths ? ZP_EARLY_NATIVE_CORE_LEGACY
 					    : ZP_EARLY_NATIVE_CORE_DEFAULT;
 }
@@ -1178,7 +1265,8 @@ static int zp_stage_file_fd(const char *path,
 	}
 
 	if (policy_state) {
-		ret = yz_host_file_load_policy_allow_current(file, policy_state);
+		ret =
+		    yz_host_file_load_policy_allow_current(file, policy_state);
 		if (ret)
 			pr_info("zygote_probe: [2c-3b] load policy allow %s "
 				"failed: %d\n",
@@ -1260,7 +1348,7 @@ static int zp_install_packet_fd(const void *buf, size_t size)
 }
 
 static int
-zp_stage_early_native_packet(u8 target_type, const char *target,
+zp_stage_early_native_packet(u8 target_type, const char *target, bool compat,
 			     struct yz_file_load_policy *policy_state,
 			     struct zp_early_packet_state *state)
 {
@@ -1294,6 +1382,10 @@ zp_stage_early_native_packet(u8 target_type, const char *target,
 		if (entry->target_type != target_type)
 			continue;
 		if (strcmp(entry->target, target))
+			continue;
+		if (compat && !(entry->flags & YZ_EARLY_NATIVE_ENTRY_ABI32))
+			continue;
+		if (!compat && !(entry->flags & YZ_EARLY_NATIVE_ENTRY_ABI64))
 			continue;
 		matches[match_count++] = *entry;
 	}
@@ -1371,18 +1463,165 @@ struct zp_inject_tw {
 	char label[64];
 };
 
+static int zp_find_stack_at_entry(struct pt_regs *regs, bool compat,
+				  unsigned long *entry_addr,
+				  unsigned long *entry_value)
+{
+	unsigned long p = user_stack_pointer(regs);
+	unsigned long word;
+	int argc;
+
+#ifdef CONFIG_COMPAT
+	if (compat) {
+		compat_ulong_t cword;
+
+		if (get_user(cword, (compat_ulong_t __user *)p))
+			return -EFAULT;
+		argc = (int)cword;
+		p += sizeof(cword);
+		p += (unsigned long)(argc + 1) * sizeof(cword);
+		for (;;) {
+			if (get_user(cword, (compat_ulong_t __user *)p))
+				return -EFAULT;
+			p += sizeof(cword);
+			if (!cword)
+				break;
+		}
+		for (;;) {
+			compat_ulong_t cval;
+
+			if (get_user(cword, (compat_ulong_t __user *)p) ||
+			    get_user(
+				cval,
+				(compat_ulong_t __user *)(p + sizeof(cword))))
+				return -EFAULT;
+			if (cword == AT_NULL)
+				return -ENOENT;
+			if (cword == AT_ENTRY) {
+				*entry_addr = p + sizeof(cword);
+				*entry_value = cval;
+				return 0;
+			}
+			p += 2 * sizeof(cword);
+		}
+	}
+#else
+	(void)compat;
+#endif // #ifdef CONFIG_COMPAT
+
+	if (get_user(word, (unsigned long __user *)p))
+		return -EFAULT;
+	argc = (int)word;
+	p += sizeof(word);
+	p += (unsigned long)(argc + 1) * sizeof(word);
+	for (;;) {
+		if (get_user(word, (unsigned long __user *)p))
+			return -EFAULT;
+		p += sizeof(word);
+		if (!word)
+			break;
+	}
+	for (;;) {
+		unsigned long val;
+
+		if (get_user(word, (unsigned long __user *)p) ||
+		    get_user(val, (unsigned long __user *)(p + sizeof(word))))
+			return -EFAULT;
+		if (word == AT_NULL)
+			return -ENOENT;
+		if (word == AT_ENTRY) {
+			*entry_addr = p + sizeof(word);
+			*entry_value = val;
+			return 0;
+		}
+		p += 2 * sizeof(word);
+	}
+}
+
+static int zp_write_stack_at_entry(unsigned long addr, unsigned long value,
+				   bool compat)
+{
+#ifdef CONFIG_COMPAT
+	if (compat)
+		return put_user((compat_ulong_t)value,
+				(compat_ulong_t __user *)addr);
+#else
+	(void)compat;
+#endif // #ifdef CONFIG_COMPAT
+	return put_user(value, (unsigned long __user *)addr);
+}
+
+static int zp_read_stack_at_entry(unsigned long addr, unsigned long *value,
+				  bool compat)
+{
+#ifdef CONFIG_COMPAT
+	if (compat) {
+		compat_ulong_t cvalue;
+		int ret = get_user(cvalue, (compat_ulong_t __user *)addr);
+
+		*value = cvalue;
+		return ret;
+	}
+#else
+	(void)compat;
+#endif // #ifdef CONFIG_COMPAT
+	return get_user(*value, (unsigned long __user *)addr);
+}
+
+static void zp_read_saved_auxv(struct mm_struct *mm, bool compat,
+			       unsigned long *entry, unsigned long *base)
+{
+	size_t k;
+
+	*entry = 0;
+	*base = 0;
+#ifdef CONFIG_COMPAT
+	if (compat) {
+		const compat_ulong_t *auxv =
+		    (const compat_ulong_t *)mm->saved_auxv;
+		const size_t auxv_bytes = sizeof(mm->saved_auxv);
+		const size_t words = auxv_bytes / sizeof(*auxv);
+
+		for (k = 0; k + 1 < words; k += 2) {
+			compat_ulong_t type = auxv[k];
+
+			if (type == AT_NULL)
+				break;
+			if (type == AT_ENTRY)
+				*entry = auxv[k + 1];
+			else if (type == AT_BASE)
+				*base = auxv[k + 1];
+		}
+		return;
+	}
+#else
+	(void)compat;
+#endif
+
+	for (k = 0; k + 1 < AT_VECTOR_SIZE; k += 2) {
+		unsigned long type = mm->saved_auxv[k];
+
+		if (type == AT_NULL)
+			break;
+		if (type == AT_ENTRY)
+			*entry = mm->saved_auxv[k + 1];
+		else if (type == AT_BASE)
+			*base = mm->saved_auxv[k + 1];
+	}
+}
+
 /* AT_ENTRY rewrite task_work. */
 static void zp_inject_tw_func(struct callback_head *cb)
 {
 	struct zp_inject_tw *tw = container_of(cb, struct zp_inject_tw, cb);
 	struct mm_struct *mm = current->mm;
 	struct pt_regs *uregs;
-	unsigned long sp, p, word, val;
 	unsigned long saved = 0, at_entry_uaddr = 0, at_entry_uval = 0;
 	unsigned long at_base = 0;
+	u64 dlopen_off, dlsym_off;
 	char socket_name[64];
-	int argc, k;
 	bool native = tw->kind == ZP_INJECT_NATIVE;
+	bool compat = false;
 
 	if (!mm)
 		goto out;
@@ -1401,62 +1640,20 @@ static void zp_inject_tw_func(struct callback_head *cb)
 	}
 
 #ifdef CONFIG_COMPAT
-	/* 32-bit targets need a separate stub. */
-	if (is_compat_task()) {
-		pr_info("zygote_probe: pid=%d socket=%s 32-bit target, "
-			"skipping injection\n",
-			current->pid, socket_name);
-		goto out;
-	}
+	compat = is_compat_task();
 #endif // #ifdef CONFIG_COMPAT
+	dlopen_off = compat ? zp_dlopen32_off : zp_dlopen_off;
+	dlsym_off = compat ? zp_dlsym32_off : zp_dlsym_off;
 
 	if (!native && zp_zygote_safemode_should_skip(socket_name))
 		goto out;
 
-	for (k = 0; k < AT_VECTOR_SIZE - 1; k += 2) {
-		/* AT_ENTRY + AT_BASE (linker load base) from the saved copy */
-		unsigned long t = mm->saved_auxv[k];
+	zp_read_saved_auxv(mm, compat, &saved, &at_base);
 
-		if (t == AT_NULL)
-			break;
-		if (t == AT_ENTRY)
-			saved = mm->saved_auxv[k + 1];
-		else if (t == AT_BASE)
-			at_base = mm->saved_auxv[k + 1];
-	}
-
-	/* stack: [argc][argv..][NULL][envp..][NULL][auxv (type,val)..] */
 	uregs = task_pt_regs(current);
-	sp = user_stack_pointer(uregs);
-	p = sp;
-	if (get_user(word, (unsigned long __user *)p))
+	if (zp_find_stack_at_entry(uregs, compat, &at_entry_uaddr,
+				   &at_entry_uval))
 		goto out;
-	argc = (int)word;
-	p += sizeof(unsigned long);
-	p += (unsigned long)(argc + 1) * sizeof(unsigned long);
-	for (;;) { /* skip envp[] */
-		if (get_user(word, (unsigned long __user *)p))
-			goto out;
-		p += sizeof(unsigned long);
-		if (!word)
-			break;
-	}
-	for (;;) { /* walk auxv */
-		if (get_user(word, (unsigned long __user *)p))
-			goto out;
-		if (get_user(
-			val,
-			(unsigned long __user *)(p + sizeof(unsigned long))))
-			goto out;
-		if (word == AT_NULL)
-			break;
-		if (word == AT_ENTRY) {
-			at_entry_uaddr = p + sizeof(unsigned long);
-			at_entry_uval = val;
-			break;
-		}
-		p += 2 * sizeof(unsigned long);
-	}
 
 	pr_info("zygote_probe: [1a] pid=%d socket=%s AT_ENTRY saved=0x%lx "
 		"stack@0x%lx "
@@ -1465,19 +1662,19 @@ static void zp_inject_tw_func(struct callback_head *cb)
 		(at_entry_uaddr && at_entry_uval == saved) ? "MATCH"
 							   : "MISMATCH");
 
-	if (at_base && zp_dlopen_off)
+	if (at_base && dlopen_off)
 		pr_info("zygote_probe: [2c-2] pid=%d socket=%s AT_BASE=0x%lx "
 			"off=0x%llx -> "
 			"dlopen=0x%llx\n",
-			current->pid, socket_name, at_base, zp_dlopen_off,
-			(u64)at_base + zp_dlopen_off);
+			current->pid, socket_name, at_base, dlopen_off,
+			(u64)at_base + dlopen_off);
 
 	if (at_entry_uaddr && at_entry_uval == saved) {
 		unsigned long check = ~saved;
 		int werr =
-		    put_user(saved, (unsigned long __user *)at_entry_uaddr);
+		    zp_write_stack_at_entry(at_entry_uaddr, saved, compat);
 		int rerr =
-		    get_user(check, (unsigned long __user *)at_entry_uaddr);
+		    zp_read_stack_at_entry(at_entry_uaddr, &check, compat);
 
 		pr_info("zygote_probe: [1b] pid=%d socket=%s wrote "
 			"AT_ENTRY@0x%lx=0x%lx "
@@ -1490,8 +1687,7 @@ static void zp_inject_tw_func(struct callback_head *cb)
 
 	/* Redirect only after the stub is staged. */
 	if (at_entry_uaddr && at_entry_uval == saved && saved) {
-#ifdef CONFIG_ARM64
-		/* AArch64 AT_ENTRY stub. */
+		/* Native-ABI AT_ENTRY stub. */
 		static const u32 tmpl[] = {
 		    0x10000013, 0xd10103ff, 0xd2800014, 0xf2a00014, 0xf2c00014,
 		    0xf2e00014, 0xd2800015, 0xf2a00015, 0xf2c00015, 0xf2e00015,
@@ -1505,38 +1701,59 @@ static void zp_inject_tw_func(struct callback_head *cb)
 		    0xd2800000, 0xd2800001, 0xd63f0320, 0xf9400fe0, 0xf94007f4,
 		    0x910103ff, 0xaa1403f0, 0xd61f0200,
 		};
+		static const u8 compat_tmpl[] = {
+		    0x2d, 0xe9, 0xf7, 0x43, 0xf8, 0x46, 0xa8, 0xf1, 0x08, 0x08,
+		    0x11, 0x4c, 0x11, 0x4d, 0x12, 0x4e, 0x08, 0xf6, 0x00, 0x40,
+		    0x02, 0x21, 0x08, 0xf6, 0x00, 0x22, 0x23, 0x46, 0xa8, 0x47,
+		    0x81, 0x46, 0x0e, 0x48, 0x06, 0x27, 0x00, 0xdf, 0x48, 0x46,
+		    0x48, 0xb1, 0x08, 0xf6, 0x00, 0x51, 0x22, 0x46, 0xb0, 0x47,
+		    0x20, 0xb1, 0x03, 0x46, 0x0a, 0x48, 0x0a, 0x49, 0x98, 0x47,
+		    0x04, 0xe0, 0x08, 0x48, 0x00, 0x28, 0x01, 0xdb, 0x06, 0x27,
+		    0x00, 0xdf, 0xa4, 0x46, 0xbd, 0xe8, 0xf7, 0x43, 0x60, 0x47,
+		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		    0x00, 0x00, 0x00, 0x00,
+		};
+		static_assert(sizeof(compat_tmpl) == 0x68);
 		u32 code[ARRAY_SIZE(tmpl)];
+		u8 compat_code[ARRAY_SIZE(compat_tmpl)];
 		struct zp_dlextinfo extinfo;
+		struct zp_compat_dlextinfo compat_extinfo;
 		struct yz_file_load_policy native_policy = {};
 		struct zp_early_packet_state early_packet;
 		unsigned long stub, dlopen_addr, dlsym_addr;
+		unsigned long redirected_entry;
 		int loader_fd, core_fd, stub_core_fd;
 		int early_packet_arg, werr;
-		bool yuki;
+		bool copy_failed, yuki;
 		const char *lib_str, *entry_str;
 		const char *loader_path, *core_path;
 		size_t lib_len, entry_len;
 		char loader_name[ZP_VMA_NAME_LEN], core_name[ZP_VMA_NAME_LEN];
 
 		zp_early_packet_state_init(&early_packet);
-		if (!at_base || !zp_dlopen_off || !zp_dlsym_off) {
+		if (!at_base || !dlopen_off || !dlsym_off) {
 			pr_info("zygote_probe: [2c-3b] pid=%d socket=%s no "
 				"dlopen/dlsym addr yet, skipping\n",
 				current->pid, socket_name);
 			goto out;
 		}
-		dlopen_addr = at_base + zp_dlopen_off;
-		dlsym_addr = at_base + zp_dlsym_off;
+		dlopen_addr = at_base + dlopen_off;
+		dlsym_addr = at_base + dlsym_off;
 
 		/* Stage loader/core fds in the target. */
 		yuki = native || zp_yukilinker_enabled;
-		loader_path = native && tw->early_native
-				  ? zp_early_loader_path()
-				  : ZP_LOADER_PATH;
-		core_path =
-		    native ? (tw->early_native ? zp_early_native_core_path()
-					       : ZP_NATIVE_CORE_PATH)
-			   : ZP_CORE_PATH;
+		loader_path =
+		    native && tw->early_native
+			? zp_early_loader_path(compat)
+			: (compat ? ZP_LOADER32_PATH : ZP_LOADER_PATH);
+		if (native)
+			core_path = tw->early_native
+					? zp_early_native_core_path(compat)
+					: (compat ? ZP_NATIVE_CORE32_PATH
+						  : ZP_NATIVE_CORE_PATH);
+		else
+			core_path = compat ? ZP_CORE32_PATH : ZP_CORE_PATH;
 		zp_cache_name(loader_name, sizeof(loader_name));
 		zp_cache_name(core_name, sizeof(core_name));
 		if (yuki)
@@ -1545,8 +1762,8 @@ static void zp_inject_tw_func(struct callback_head *cb)
 		else if (native)
 			loader_fd = zp_stage_file_fd(core_path, &native_policy);
 		else
-			loader_fd = zp_stage_fd(core_path, core_name,
-						&native_policy);
+			loader_fd =
+			    zp_stage_fd(core_path, core_name, &native_policy);
 		if (loader_fd < 0) {
 			pr_info("zygote_probe: [2c-3b] pid=%d socket=%s stage "
 				"loader "
@@ -1571,8 +1788,8 @@ static void zp_inject_tw_func(struct callback_head *cb)
 		early_packet_arg = 0;
 		if (native && tw->early_native) {
 			int ret = zp_stage_early_native_packet(
-			    tw->native_target_type, tw->label, &native_policy,
-			    &early_packet);
+			    tw->native_target_type, tw->label, compat,
+			    &native_policy, &early_packet);
 
 			if (ret < 0 || early_packet.packet_fd < 0 ||
 			    early_packet.packet_fd >= 0xffff) {
@@ -1590,8 +1807,9 @@ static void zp_inject_tw_func(struct callback_head *cb)
 			early_packet_arg = early_packet.packet_fd + 1;
 		}
 		{
-			int ret = yz_host_file_load_policy_allow_execmem_current(
-			    &native_policy);
+			int ret =
+			    yz_host_file_load_policy_allow_execmem_current(
+				&native_policy);
 
 			if (ret < 0) {
 				pr_info("zygote_probe: [2c-3b] pid=%d "
@@ -1631,29 +1849,60 @@ static void zp_inject_tw_func(struct callback_head *cb)
 		code[45] = 0xd2800000u | (((u32)stub_core_fd & 0xffff) << 5);
 		code[46] =
 		    0xd2800001u | (((u32)early_packet_arg & 0xffff) << 5);
+		memcpy(compat_code, compat_tmpl, sizeof(compat_code));
+		{
+			u32 value = (u32)saved;
 
-		/* Choose first-stage entry. */
-		if (yuki) {
-			lib_str = "libyukilinker.so";
-			lib_len = sizeof("libyukilinker.so");
-			entry_str = "yuki_bootstrap";
-			entry_len = sizeof("yuki_bootstrap");
-		} else {
-			lib_str = native ? "libyukizncore.so" : "libzygisk.so";
-			lib_len = native ? sizeof("libyukizncore.so")
-					 : sizeof("libzygisk.so");
-			entry_str = "zygisk_core_entry_direct";
-			entry_len = sizeof("zygisk_core_entry_direct");
-		}
+			memcpy(&compat_code[0x50], &value, sizeof(value));
+			value = (u32)dlopen_addr;
+			memcpy(&compat_code[0x54], &value, sizeof(value));
+			value = (u32)dlsym_addr;
+			memcpy(&compat_code[0x58], &value, sizeof(value));
+			value = (u32)loader_fd;
+			memcpy(&compat_code[0x5c], &value, sizeof(value));
+			value = (u32)stub_core_fd;
+                        memcpy(&compat_code[0x60], &value, sizeof(value));
+                        value = (u32)early_packet_arg;
+                        memcpy(&compat_code[0x64], &value, sizeof(value));
+                }
 
-		memset(&extinfo, 0, sizeof(extinfo));
-		extinfo.flags = ZP_DLEXT_USE_LIBRARY_FD |
-				(native ? ZP_DLEXT_FORCE_LOAD : 0);
-		extinfo.library_fd = loader_fd;
+                /* Choose first-stage entry. */
+                if (yuki) {
+                  lib_str = compat ? ZP_LOADER_NAME32 : ZP_LOADER_NAME64;
+                  entry_str = "yuki_bootstrap";
+                  entry_len = sizeof("yuki_bootstrap");
+                } else {
+                  if (native)
+                    lib_str =
+                        compat ? ZP_NATIVE_CORE_NAME32 : ZP_NATIVE_CORE_NAME64;
+                  else
+                    lib_str = compat ? ZP_CORE_NAME32 : ZP_CORE_NAME64;
+                  entry_str = "zygisk_core_entry_direct";
+                  entry_len = sizeof("zygisk_core_entry_direct");
+                }
+                lib_len = strlen(lib_str) + 1;
 
-		if (copy_to_user((void __user *)stub, code, sizeof(code)) ||
-		    copy_to_user((void __user *)(stub + ZP_STUB_EXTINFO_OFF),
-				 &extinfo, sizeof(extinfo)) ||
+                memset(&extinfo, 0, sizeof(extinfo));
+                extinfo.flags = ZP_DLEXT_USE_LIBRARY_FD |
+                                (native ? ZP_DLEXT_FORCE_LOAD : 0);
+                extinfo.library_fd = loader_fd;
+                memset(&compat_extinfo, 0, sizeof(compat_extinfo));
+                compat_extinfo.flags = extinfo.flags;
+                compat_extinfo.library_fd = loader_fd;
+
+                if (compat) {
+                  copy_failed =
+                      copy_to_user((void __user *)stub, compat_code,
+                                   sizeof(compat_code)) ||
+                      copy_to_user((void __user *)(stub + ZP_STUB_EXTINFO_OFF),
+                                   &compat_extinfo, sizeof(compat_extinfo));
+                } else {
+                  copy_failed =
+                      copy_to_user((void __user *)stub, code, sizeof(code)) ||
+                      copy_to_user((void __user *)(stub + ZP_STUB_EXTINFO_OFF),
+                                   &extinfo, sizeof(extinfo));
+                }
+                if (copy_failed ||
 		    copy_to_user((void __user *)(stub + ZP_STUB_STR_OFF),
 				 lib_str, lib_len) ||
 		    copy_to_user((void __user *)(stub + ZP_STUB_ENTRY_STR_OFF),
@@ -1670,16 +1919,33 @@ static void zp_inject_tw_func(struct callback_head *cb)
 			zp_restore_native_policy_state(&native_policy);
 			goto out;
 		}
+		{
+			u32 marker = 0x52414e21u;
 
-		flush_icache_range(stub, stub + sizeof(code));
+			if (copy_to_user((void __user *)(stub + 0x800), &marker,
+					 sizeof(marker))) {
+				vm_munmap(stub, PAGE_SIZE);
+				zp_close_current_fd(loader_fd);
+				if (yuki)
+					zp_close_current_fd(core_fd);
+				zp_close_early_packet_state(&early_packet);
+				zp_restore_native_policy_state(&native_policy);
+				goto out;
+			}
+		}
 
-		werr = put_user(stub, (unsigned long __user *)at_entry_uaddr);
+		flush_icache_range(
+		    stub, stub + (compat ? sizeof(compat_code) : sizeof(code)));
+
+		redirected_entry = compat ? stub | 1UL : stub;
+		werr = zp_write_stack_at_entry(at_entry_uaddr, redirected_entry,
+					       compat);
 		pr_info(
-		    "zygote_probe: [2c-3b] pid=%d socket=%s stub@0x%lx "
+		    "zygote_probe: [2c-3b] pid=%d socket=%s abi=%s stub@0x%lx "
 		    "loader_fd=%d "
 		    "core_fd=%d dlopen@0x%lx dlsym@0x%lx -> entry 0x%lx %s\n",
-		    current->pid, socket_name, stub, loader_fd, core_fd,
-		    dlopen_addr, dlsym_addr, saved,
+		    current->pid, socket_name, compat ? "arm" : "arm64", stub,
+		    loader_fd, core_fd, dlopen_addr, dlsym_addr, saved,
 		    werr ? "FAIL" : "REDIRECTED");
 		if (werr) {
 			vm_munmap(stub, PAGE_SIZE);
@@ -1692,11 +1958,6 @@ static void zp_inject_tw_func(struct callback_head *cb)
 			zp_publish_native_policy_state(current->tgid,
 						       &native_policy);
 		}
-#else
-		pr_info("zygote_probe: [1c] pid=%d socket=%s redirect: arm64 "
-			"only\n",
-			current->pid, socket_name);
-#endif // #ifdef CONFIG_ARM64
 	}
 out:
 	kfree(tw);
@@ -1775,7 +2036,8 @@ void yz_zygote_probe_init(void)
 	int ret;
 
 	if (!zp_enable_lsm_injector) {
-		pr_info("zygote_probe: LSM injector disabled by module parameter\n");
+		pr_info("zygote_probe: LSM injector disabled by module "
+			"parameter\n");
 		return;
 	}
 

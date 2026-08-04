@@ -6,23 +6,32 @@
 #
 # Author: Anatdx
 
-add_executable(zygiskd
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+  set(ZYGISKD_TARGET zygiskd64)
+elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
+  set(ZYGISKD_TARGET zygiskd32)
+else()
+  message(FATAL_ERROR
+    "YukiZygisk daemon only supports arm64-v8a and armeabi-v7a")
+endif()
+
+add_executable(${ZYGISKD_TARGET}
   root_policy.cpp
   zygiskd.cpp
 )
 
-target_compile_features(zygiskd PRIVATE cxx_std_17)
+target_compile_features(${ZYGISKD_TARGET} PRIVATE cxx_std_17)
 target_include_directories(
-  zygiskd
+  ${ZYGISKD_TARGET}
   PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/userspace/common
 )
-target_compile_definitions(zygiskd PRIVATE _GNU_SOURCE)
+target_compile_definitions(${ZYGISKD_TARGET} PRIVATE _GNU_SOURCE)
 
 if(ANDROID)
-  target_link_libraries(zygiskd PRIVATE dl)
+  target_link_libraries(${ZYGISKD_TARGET} PRIVATE dl)
 else()
   find_package(Threads REQUIRED)
-  target_link_libraries(zygiskd PRIVATE dl Threads::Threads)
+  target_link_libraries(${ZYGISKD_TARGET} PRIVATE dl Threads::Threads)
 endif()

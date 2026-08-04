@@ -125,8 +125,12 @@ struct yz_native_targets_cmd {
 };
 
 #define YZ_EARLY_NATIVE_MAGIC 0x59454e5a /* YENZ */
-#define YZ_EARLY_NATIVE_VERSION 1
+#define YZ_EARLY_NATIVE_VERSION 2
 #define YZ_EARLY_NATIVE_FLAG_ENABLED (1U << 0)
+#define YZ_EARLY_NATIVE_FLAG_ABI32 (1U << 1)
+#define YZ_EARLY_NATIVE_FLAG_ABI64 (1U << 2)
+#define YZ_EARLY_NATIVE_ENTRY_ABI32 (1U << 0)
+#define YZ_EARLY_NATIVE_ENTRY_ABI64 (1U << 1)
 
 struct yz_early_native_snapshot_header {
 	__u32 magic;
@@ -139,6 +143,9 @@ struct yz_early_native_snapshot_header {
 	__u64 dlopen_offset;
 	__u64 dlsym_offset;
 	__u64 linker_size;
+	__u64 dlopen32_offset;
+	__u64 dlsym32_offset;
+	__u64 linker32_size;
 };
 
 struct yz_early_native_entry {
@@ -270,6 +277,8 @@ struct yz_module_load_policy_cmd {
 	__u32 pid;
 	__s32 dirfd;
 };
+
+#define YZ_IOCTL_SET_DLOPEN32 _IOC(_IOC_WRITE, YZ_IOCTL_MAGIC, 67, 0)
 
 struct yz_config {
 	__u8 yukilinker;

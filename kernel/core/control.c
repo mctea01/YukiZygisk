@@ -52,6 +52,16 @@ static int yz_ioctl_set_dlopen(void __user *arg)
 	return 0;
 }
 
+static int yz_ioctl_set_dlopen32(void __user *arg)
+{
+	struct yz_dlopen_cmd cmd;
+
+	if (copy_from_user(&cmd, arg, sizeof(cmd)))
+		return -EFAULT;
+	yz_zygote_probe_set_dlopen32_off(cmd.dlopen_offset, cmd.dlsym_offset);
+	return 0;
+}
+
 static int yz_ioctl_set_yukilinker(void __user *arg)
 {
 	struct yz_yukilinker_cmd cmd;
@@ -408,6 +418,8 @@ static long yukizygisk_ioctl(struct file *file, unsigned int request,
 		return yz_zygote_ctl_handoff(uarg);
 	case YZ_IOCTL_SET_DLOPEN:
 		return yz_ioctl_set_dlopen(uarg);
+	case YZ_IOCTL_SET_DLOPEN32:
+		return yz_ioctl_set_dlopen32(uarg);
 	case YZ_IOCTL_RELOAD:
 		yz_zygote_nl_emit_reload();
 		return 0;

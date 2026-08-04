@@ -33,6 +33,7 @@
 
 #include <dlfcn.h>
 #include <elf.h>
+#include <link.h>
 #include <pthread.h>
 
 #include <algorithm>
@@ -88,8 +89,12 @@ namespace {
 
 #if defined(__aarch64__)
 constexpr char kAbi[] = "arm64-v8a";
+constexpr char kLinkerPath[] = "/system/bin/linker64";
+constexpr int kSetDlopenRequest = YZ_IOCTL_SET_DLOPEN;
 #elif defined(__arm__)
 constexpr char kAbi[] = "armeabi-v7a";
+constexpr char kLinkerPath[] = "/system/bin/linker";
+constexpr int kSetDlopenRequest = YZ_IOCTL_SET_DLOPEN32;
 #elif defined(__x86_64__)
 constexpr char kAbi[] = "x86_64";
 #elif defined(__i386__)
@@ -135,8 +140,7 @@ bool parse_i32(const char *s, int *out) {
   errno = 0;
   char *end = nullptr;
   long v = strtol(s, &end, 0);
-  if (errno != 0 || end == s || *end != '\0' || v < INT32_MIN ||
-      v > INT32_MAX)
+  if (errno != 0 || end == s || *end != '\0' || v < INT32_MIN || v > INT32_MAX)
     return false;
   *out = static_cast<int>(v);
   return true;
@@ -160,7 +164,15 @@ bool option_value(int argc, char **argv, int *index, const char *name,
 }
 
 void load_env() {
-  const char *env = getenv("YUKIZYGISK_MODULES_DIR");
+  const char *env = getenv("YUKIZYGISK_CONTROL_FD");
+  if (env != nullptr && *env != '\0') {
+    int inherited_fd = -1;
+    if (parse_i32(env, &inherited_fd) && inherited_fd >= 0 &&
+        fcntl(inherited_fd, F_GETFD) >= 0)
+      g_control_fd = inherited_fd;
+  }
+
+  env = getenv("YUKIZYGISK_MODULES_DIR");
   if (env != nullptr && *env != '\0')
     g_modules_dir = env;
 
@@ -248,7 +260,8 @@ int claim_control_fd() {
     return -1;
   }
   if (ret != 0) {
-    DLOGI("bootstrap prctl returned ret=%ld errno=%d (%s), accepting delivered fd=%d",
+    DLOGI("bootstrap prctl returned ret=%ld errno=%d (%s), accepting delivered "
+          "fd=%d",
           ret, saved_errno, strerror(saved_errno), fd);
   }
 
@@ -320,6 +333,7 @@ std::vector<Module> g_modules;
 using NativeModule = yukizygisk::native::NativeModule;
 
 std::vector<NativeModule> g_native_modules;
+std::vector<NativeModule> g_native_targets;
 
 struct SafemodeStatus {
   bool active = false;
@@ -351,6 +365,60 @@ void notify_ready(int fd, bool ok) {
   (void)w;
   close(fd);
 }
+
+#if defined(__LP64__)
+bool spawn_compat_daemon() {
+  char exe_path[PATH_MAX];
+  ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+  if (exe_len <= 0)
+    return false;
+  exe_path[exe_len] = '\0';
+  char *leaf = strrchr(exe_path, '/');
+  if (leaf == nullptr ||
+      static_cast<size_t>(leaf - exe_path) + sizeof("/zygiskd32") >
+          sizeof(exe_path))
+    return false;
+  memcpy(leaf, "/zygiskd32", sizeof("/zygiskd32"));
+
+  int ready[2];
+  if (pipe2(ready, O_CLOEXEC) != 0)
+    return false;
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(ready[0]);
+    int control_fd = fcntl(yzhost::g_control_fd, F_DUPFD, 3);
+    if (control_fd < 0 || fcntl(control_fd, F_SETFD, 0) != 0 ||
+        fcntl(ready[1], F_SETFD, 0) != 0)
+      _exit(127);
+    char control_text[16];
+    char ready_text[16];
+    char manager_text[16];
+    snprintf(control_text, sizeof(control_text), "%d", control_fd);
+    snprintf(ready_text, sizeof(ready_text), "%d", ready[1]);
+    snprintf(manager_text, sizeof(manager_text), "%d", yzhost::manager_uid());
+    setenv("YUKIZYGISK_CONTROL_FD", control_text, 1);
+    setenv("YUKIZYGISK_READY_FD", ready_text, 1);
+    setenv("YUKIZYGISK_MODULES_DIR", yzhost::modules_dir().c_str(), 1);
+    setenv("YUKIZYGISK_CONFIG", yzhost::config_path().c_str(), 1);
+    setenv("YUKIZYGISK_MANAGER_UID", manager_text, 1);
+    execl(exe_path, exe_path, static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  close(ready[1]);
+  if (pid < 0) {
+    close(ready[0]);
+    return false;
+  }
+
+  pollfd pfd{ready[0], POLLIN, 0};
+  char result = '0';
+  bool ok = poll(&pfd, 1, 5000) > 0 && read(ready[0], &result, 1) == 1 &&
+            result == '1';
+  close(ready[0]);
+  DLOGI("zygiskd32 spawn pid=%d ready=%u", pid, ok ? 1U : 0U);
+  return ok;
+}
+#endif // #if defined(__LP64__)
 
 /* Enabled zygisk modules for this ABI. */
 std::vector<Module> scan_modules() {
@@ -414,11 +482,34 @@ std::vector<NativeModule> scan_native_modules() {
   return mods;
 }
 
+int native_module_elf_class(const std::string &path) {
+  unsigned char ident[EI_NIDENT]{};
+  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return ELFCLASSNONE;
+  ssize_t n = read(fd, ident, sizeof(ident));
+  close(fd);
+  if (n != static_cast<ssize_t>(sizeof(ident)) ||
+      memcmp(ident, ELFMAG, SELFMAG) != 0 || ident[EI_DATA] != ELFDATA2LSB)
+    return ELFCLASSNONE;
+  return ident[EI_CLASS];
+}
+
 void publish_native_targets() {
   yz_native_targets_cmd cmd{};
-  for (const auto &m : g_native_modules) {
+  for (const auto &m : g_native_targets) {
     if (cmd.count >= YZ_NATIVE_TARGET_MAX)
       break;
+    bool duplicate = false;
+    for (uint32_t i = 0; i < cmd.count; ++i) {
+      if (cmd.targets[i].type == m.target_type &&
+          strcmp(cmd.targets[i].value, m.target.c_str()) == 0) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate)
+      continue;
     yz_native_target &t = cmd.targets[cmd.count++];
     t.type = m.target_type;
     snprintf(t.value, sizeof(t.value), "%s", m.target.c_str());
@@ -434,8 +525,21 @@ void publish_native_targets() {
 
 void rescan_modules() {
   g_modules = scan_modules();
-  g_native_modules = scan_native_modules();
+  std::vector<NativeModule> scanned = scan_native_modules();
+  g_native_targets.clear();
+  g_native_modules.clear();
+  constexpr int kElfClass = sizeof(void *) == 8 ? ELFCLASS64 : ELFCLASS32;
+  for (const auto &module : scanned) {
+    int module_class = native_module_elf_class(module.lib_path);
+    if (module_class != ELFCLASS32 && module_class != ELFCLASS64)
+      continue;
+    g_native_targets.push_back(module);
+    if (module_class == kElfClass)
+      g_native_modules.push_back(module);
+  }
+#if defined(__LP64__)
   publish_native_targets();
+#endif // #if defined(__LP64__)
   DLOGI("found %zu zygisk module(s), %zu native module(s) for %s",
         g_modules.size(), g_native_modules.size(), kAbi);
 }
@@ -682,8 +786,8 @@ int copy_file_to_memfd(const std::string &path) {
   snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%d", mfd);
   int ro_fd = open(proc_fd, O_RDONLY | O_CLOEXEC);
   if (ro_fd < 0) {
-    DLOGE("module memfd: reopen read-only failed path=%s err=%s",
-          path.c_str(), strerror(errno));
+    DLOGE("module memfd: reopen read-only failed path=%s err=%s", path.c_str(),
+          strerror(errno));
     close(mfd);
     return -1;
   }
@@ -741,7 +845,7 @@ void *companion_thread(void *p) {
     }
     closedir(fdd);
   }
-  void *h = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  void *h = dlopen(lib_path.c_str(), RTLD_NOW);
   auto fn = h ? reinterpret_cast<companion_entry_fn>(
                     dlsym(h, "zygisk_companion_entry"))
               : nullptr;
@@ -848,7 +952,7 @@ void *native_companion_thread(void *p) {
     closedir(fdd);
   }
 
-  void *h = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  void *h = dlopen(lib_path.c_str(), RTLD_NOW);
   auto *mod = h ? reinterpret_cast<ZygiskNextCompanionModule *>(
                       dlsym(h, "zn_companion_module"))
                 : nullptr;
@@ -1027,8 +1131,8 @@ void read_yzconfig() {
   yz_yukilinker_cmd yc{};
   yc.enabled = cfg.yukilinker;
   yzhost::ctl(YZ_IOCTL_SET_YUKILINKER, &yc);
-  DLOGI("yzconfig: yukilinker=%u denylist_mode=%u dmesg_log=%u",
-        cfg.yukilinker, cfg.denylist_mode, cfg.dmesg_log);
+  DLOGI("yzconfig: yukilinker=%u denylist_mode=%u dmesg_log=%u", cfg.yukilinker,
+        cfg.denylist_mode, cfg.dmesg_log);
 }
 
 void refresh_safemode_status() {
@@ -1119,9 +1223,9 @@ std::vector<yz_zygote_variant> kernel_zygote_variants() {
   return variants;
 }
 
-std::string captured_zygote_name(
-    pid_t pid, const std::string &fallback,
-    const std::vector<yz_zygote_variant> &variants) {
+std::string
+captured_zygote_name(pid_t pid, const std::string &fallback,
+                     const std::vector<yz_zygote_variant> &variants) {
   for (const auto &variant : variants)
     if (variant.pid == static_cast<uint32_t>(pid))
       return variant.name;
@@ -1207,10 +1311,6 @@ std::string zygote_abi(pid_t pid, const std::string &abi_list) {
   return "unknown";
 }
 
-bool is_32bit_abi(const std::string &abi) {
-  return !abi.empty() && abi.find("64") == std::string::npos;
-}
-
 bool is_zygote_injected(uint32_t pid, const std::string &name,
                         const std::string &abi) {
   for (const auto &z : g_zygotes)
@@ -1242,9 +1342,7 @@ std::vector<ZygoteMonitorRecord> scan_zygote_monitor() {
     name = captured_zygote_name(pid, name, variants);
     std::string abi = zygote_abi(pid, abi_list);
     std::string state = "failed";
-    if (is_32bit_abi(abi))
-      state = "unsupported32";
-    else if (g_safemode.active)
+    if (g_safemode.active)
       state = "crashed";
     else if (is_zygote_injected(static_cast<uint32_t>(pid), name, abi))
       state = "injected";
@@ -1468,10 +1566,10 @@ std::string build_status_json() {
   s += ",\"root_mask\":";
   s += std::to_string(root_status.mask);
   s += ",\"ksu_redirect\":";
-  s += (root_status_ok &&
-        (root_status.flags & YZ_ROOT_STATUS_KSU_REDIRECT) != 0)
-           ? "true"
-           : "false";
+  s +=
+      (root_status_ok && (root_status.flags & YZ_ROOT_STATUS_KSU_REDIRECT) != 0)
+          ? "true"
+          : "false";
   s += ",\"root_policy_source\":\"";
   json_append_escaped(s, yzpolicy::source_name());
   s += "\"";
@@ -2000,7 +2098,7 @@ uint64_t resolve_linker_sym(const char *path, const char *want) {
   if (fd < 0)
     return 0;
   struct stat st;
-  if (fstat(fd, &st) < 0 || st.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+  if (fstat(fd, &st) < 0 || st.st_size < (off_t)sizeof(ElfW(Ehdr))) {
     close(fd);
     return 0;
   }
@@ -2010,18 +2108,19 @@ uint64_t resolve_linker_sym(const char *path, const char *want) {
     return 0;
 
   auto *base = static_cast<const uint8_t *>(map);
-  auto *eh = reinterpret_cast<const Elf64_Ehdr *>(base);
+  auto *eh = reinterpret_cast<const ElfW(Ehdr) *>(base);
   uint64_t result = 0;
   if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0 &&
-      eh->e_ident[EI_CLASS] == ELFCLASS64) {
-    auto *sh = reinterpret_cast<const Elf64_Shdr *>(base + eh->e_shoff);
+      eh->e_ident[EI_CLASS] ==
+          (sizeof(void *) == 8 ? ELFCLASS64 : ELFCLASS32)) {
+    auto *sh = reinterpret_cast<const ElfW(Shdr) *>(base + eh->e_shoff);
     for (int i = 0; i < eh->e_shnum && !result; i++) {
       if (sh[i].sh_type != SHT_DYNSYM)
         continue;
-      auto *syms = reinterpret_cast<const Elf64_Sym *>(base + sh[i].sh_offset);
+      auto *syms = reinterpret_cast<const ElfW(Sym) *>(base + sh[i].sh_offset);
       const char *strs =
           reinterpret_cast<const char *>(base + sh[sh[i].sh_link].sh_offset);
-      size_t n = sh[i].sh_size / sizeof(Elf64_Sym);
+      size_t n = sh[i].sh_size / sizeof(ElfW(Sym));
       for (size_t j = 0; j < n; j++) {
         if (strcmp(strs + syms[j].st_name, want) == 0) {
           result = syms[j].st_value;
@@ -2036,7 +2135,7 @@ uint64_t resolve_linker_sym(const char *path, const char *want) {
 
 uint64_t resolve_first(const char *const *cands, size_t n, const char **hit) {
   for (size_t i = 0; i < n; ++i) {
-    uint64_t off = resolve_linker_sym("/system/bin/linker64", cands[i]);
+    uint64_t off = resolve_linker_sym(kLinkerPath, cands[i]);
     if (off) {
       if (hit)
         *hit = cands[i];
@@ -2069,8 +2168,8 @@ bool send_dlopen_offset() {
     return false;
   }
 
-  int ret = yzhost::ctl(YZ_IOCTL_SET_DLOPEN, &cmd);
-  DLOGI("linker dlopen '%s'=0x%llx dlsym '%s'=0x%llx -> kernel ret=%d",
+  int ret = yzhost::ctl(kSetDlopenRequest, &cmd);
+  DLOGI("%s dlopen '%s'=0x%llx dlsym '%s'=0x%llx -> kernel ret=%d", kLinkerPath,
         dlopen_name, (unsigned long long)cmd.dlopen_offset, dlsym_name,
         (unsigned long long)cmd.dlsym_offset, ret);
   return ret == 0;
@@ -2100,6 +2199,15 @@ int run_daemon(int argc, char **argv) {
     return 1;
   }
 
+#if defined(__LP64__)
+  if (!spawn_compat_daemon()) {
+    DLOGE("zygiskd32 failed to start");
+    close(srv);
+    notify_ready(ready_fd, false);
+    return 1;
+  }
+#endif // #if defined(__LP64__)
+
   if (yzhost::ctl(YZ_IOCTL_PREPARE_RUNTIME_POLICY, nullptr) != 0) {
     DLOGE("failed to prepare runtime SELinux policy: %s", strerror(errno));
     close(srv);
@@ -2111,8 +2219,7 @@ int run_daemon(int argc, char **argv) {
   yz_root_status_cmd root_status{};
   bool policy_ready = false;
   if (yzhost::get_root_status(&root_status)) {
-    policy_ready =
-        yzpolicy::setup(yzhost::g_control_fd, root_status);
+    policy_ready = yzpolicy::setup(yzhost::g_control_fd, root_status);
   } else {
     DLOGE("failed to read root policy status");
   }
@@ -2122,10 +2229,11 @@ int run_daemon(int argc, char **argv) {
   refresh_safemode_status();
   bool offsets_ready = send_dlopen_offset();
 
-  DLOGI("zygiskd up: unix @%s, netlink proto=%d, modules=%s, config=%s, policy=%s ready=%u",
-        zygiskd::kSocketName, YZ_NETLINK_PROTO,
-        yzhost::modules_dir().c_str(), yzhost::config_path().c_str(),
-        yzpolicy::source_name(), policy_ready ? 1 : 0);
+  DLOGI("zygiskd up: unix @%s, netlink proto=%d, modules=%s, config=%s, "
+        "policy=%s ready=%u",
+        zygiskd::kSocketName, YZ_NETLINK_PROTO, yzhost::modules_dir().c_str(),
+        yzhost::config_path().c_str(), yzpolicy::source_name(),
+        policy_ready ? 1 : 0);
   notify_ready(ready_fd, offsets_ready && policy_ready);
 
   pollfd pfds[2] = {{srv, POLLIN, 0}, {nlfd, POLLIN, 0}};
@@ -2158,7 +2266,5 @@ extern "C" int zygiskd_main(int argc, char **argv) {
 }
 
 #ifndef YZ_ZYGISKD_NO_MAIN
-int main(int argc, char **argv) {
-  return zygiskd_main(argc, argv);
-}
+int main(int argc, char **argv) { return zygiskd_main(argc, argv); }
 #endif // #ifndef YZ_ZYGISKD_NO_MAIN
