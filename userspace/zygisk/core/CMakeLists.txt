@@ -19,9 +19,11 @@ if(NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a" AND
 endif()
 
 set(YUKILINKER_ARCH_SOURCES)
+set(YUKIZYGISK_RUNTIME_LOG_SOURCES)
 if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
     set(YUKIZYGISK_ABI_SUFFIX 64)
     list(APPEND YUKILINKER_ARCH_SOURCES src/yukilinker_tlsdesc.S)
+    list(APPEND YUKIZYGISK_RUNTIME_LOG_SOURCES src/runtime_log.cpp)
 else()
     set(YUKIZYGISK_ABI_SUFFIX 32)
 endif()
@@ -50,6 +52,7 @@ target_compile_definitions(lsplt_static PRIVATE LOG_DISABLED)
 add_library(zygisk SHARED
     src/core.cpp
     src/hook.cpp
+    ${YUKIZYGISK_RUNTIME_LOG_SOURCES}
     # the anonymous in-memory loader, compiled INTO the core so it carries its
     # own copy -- the separate first stage is then unloaded
     # right after handoff (zygisk_finalize_loader) instead of lingering.
@@ -91,6 +94,11 @@ target_compile_options(zygisk PRIVATE
     # (the OS reclaims the whole address space) so there is nothing to clean.
     -fno-c++-static-destructors)
 target_compile_definitions(zygisk PRIVATE YUKILINKER_FULL=1)
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    target_compile_definitions(zygisk PRIVATE
+        YUKIZYGISK_RUNTIME_LOG=1
+        YUKIZYGISK_LOG_SOURCE=1)
+endif()
 target_link_libraries(zygisk PRIVATE dl lsplt_static)
 # --as-needed drops the liblog DT_NEEDED that lsplt links PUBLIC: with LOG_DISABLED
 # we never call into it, so no point advertising the dependency.
@@ -139,6 +147,7 @@ target_link_options(yukizncore PRIVATE -Wl,--gc-sections -Wl,--strip-all
 # deps.
 add_library(yukilinker SHARED
     src/yukilinker.cpp
+    ${YUKIZYGISK_RUNTIME_LOG_SOURCES}
     ${YUKILINKER_ARCH_SOURCES})
 set_target_properties(yukilinker PROPERTIES
     PREFIX "lib"
@@ -157,6 +166,11 @@ target_compile_options(yukilinker PRIVATE
     # registered in the first place.
     -fno-c++-static-destructors)
 target_compile_definitions(yukilinker PRIVATE YUKILINKER_BOOTSTRAP=1)
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    target_compile_definitions(yukilinker PRIVATE
+        YUKIZYGISK_RUNTIME_LOG=1
+        YUKIZYGISK_LOG_SOURCE=3)
+endif()
 target_link_libraries(yukilinker PRIVATE dl)
 target_link_options(yukilinker PRIVATE -Wl,--gc-sections -Wl,--strip-all)
 

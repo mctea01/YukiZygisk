@@ -8,6 +8,9 @@
  */
 
 #include "zygiskd.hpp"
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+#include "log.hpp"
+#endif
 #include "native_modules.hpp"
 #include "root_policy.hpp"
 #include "uapi/yukizygisk.h"
@@ -40,6 +43,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -57,6 +61,14 @@
 
 namespace {
 
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+#define DLOGE(...)                                                             \
+  zygiskd::logging::writef(zygiskd::LogLevel::Error,                           \
+                           zygiskd::LogSource::Daemon, __VA_ARGS__)
+#define DLOGI(...)                                                             \
+  zygiskd::logging::writef(zygiskd::LogLevel::Info,                            \
+                           zygiskd::LogSource::Daemon, __VA_ARGS__)
+#else
 [[gnu::format(printf, 1, 2)]] void dlog(const char *fmt, ...) {
   static int kmsg = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
   if (kmsg < 0)
@@ -79,6 +91,7 @@ namespace {
 }
 #define DLOGE(...) dlog(__VA_ARGS__)
 #define DLOGI(...) dlog(__VA_ARGS__)
+#endif
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -514,6 +527,49 @@ bool read_exact(int fd, void *buf, size_t n) {
   }
   return true;
 }
+
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+class ClientReader {
+public:
+  explicit ClientReader(int fd)
+      : fd_(fd), deadline_(Clock::now() + std::chrono::seconds(2)) {}
+
+  bool read_exact(void *buffer, size_t size) const {
+    auto *data = static_cast<uint8_t *>(buffer);
+    while (size > 0) {
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ -
+                                                                Clock::now());
+      if (remaining.count() <= 0)
+        return false;
+
+      pollfd pfd{fd_, POLLIN, 0};
+      const int timeout =
+          static_cast<int>(std::max<int64_t>(1, remaining.count()));
+      const int ready = poll(&pfd, 1, timeout);
+      if (ready < 0 && errno == EINTR)
+        continue;
+      if (ready <= 0 || (pfd.revents & POLLIN) == 0)
+        return false;
+
+      const ssize_t received = recv(fd_, data, size, MSG_DONTWAIT);
+      if (received < 0 && (errno == EINTR || errno == EAGAIN))
+        continue;
+      if (received <= 0)
+        return false;
+      data += received;
+      size -= static_cast<size_t>(received);
+    }
+    return true;
+  }
+
+private:
+  using Clock = std::chrono::steady_clock;
+
+  int fd_;
+  Clock::time_point deadline_;
+};
+#endif
 
 bool write_exact(int fd, const void *buf, size_t n) {
   const auto *p = static_cast<const uint8_t *>(buf);
@@ -989,6 +1045,9 @@ void read_yzconfig() {
     }
   }
   g_yz_config = cfg;
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+  zygiskd::logging::set_kernel_mirror(cfg.dmesg_log != 0);
+#endif
   yz_yukilinker_cmd yc{};
   yc.enabled = cfg.yukilinker;
   yzhost::ctl(YZ_IOCTL_SET_YUKILINKER, &yc);
@@ -1056,8 +1115,18 @@ uint32_t runtime_generation(pid_t pid, uint8_t kind) {
   return generation;
 }
 void handle_client(int client) {
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+  const ClientReader reader(client);
+  const auto read_client = [&reader](void *buffer, size_t size) {
+    return reader.read_exact(buffer, size);
+  };
+#else
+  const auto read_client = [client](void *buffer, size_t size) {
+    return read_exact(client, buffer, size);
+  };
+#endif
   uint8_t op = 0;
-  if (!read_exact(client, &op, sizeof(op)))
+  if (!read_client(&op, sizeof(op)))
     return;
 
   switch (static_cast<zygiskd::Request>(op)) {
@@ -1068,7 +1137,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::GetModuleFd: {
     uint32_t idx = 0;
-    if (!read_exact(client, &idx, sizeof(idx)) || idx >= g_modules.size()) {
+    if (!read_client(&idx, sizeof(idx)) || idx >= g_modules.size()) {
       send_fd(client, -1);
       break;
     }
@@ -1083,7 +1152,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::ConnectCompanion: {
     uint32_t idx = 0;
-    if (!read_exact(client, &idx, sizeof(idx)) || !ensure_companion(idx)) {
+    if (!read_client(&idx, sizeof(idx)) || !ensure_companion(idx)) {
       send_fd(client, -1);
       break;
     }
@@ -1106,7 +1175,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::GetModuleDir: {
     uint32_t idx = 0;
-    if (!read_exact(client, &idx, sizeof(idx)) || idx >= g_modules.size()) {
+    if (!read_client(&idx, sizeof(idx)) || idx >= g_modules.size()) {
       send_fd(client, -1);
       break;
     }
@@ -1145,7 +1214,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::GetProcessFlags: {
     uint32_t uid = 0;
-    if (!read_exact(client, &uid, sizeof(uid)))
+    if (!read_client(&uid, sizeof(uid)))
       break;
     uint32_t flags = query_flags(uid);
     write_exact(client, &flags, sizeof(flags));
@@ -1167,7 +1236,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::SelfDestruct: {
     uint8_t n = 0;
-    if (!read_exact(client, &n, sizeof(n)) || n == 0 || n > YZ_MAX_UNMAP_SEGS)
+    if (!read_client(&n, sizeof(n)) || n == 0 || n > YZ_MAX_UNMAP_SEGS)
       break;
     struct ucred cr{};
     socklen_t crlen = sizeof(cr);
@@ -1179,8 +1248,8 @@ void handle_client(int client) {
       ucmd.n_segs = n;
       bool good = true;
       for (uint8_t i = 0; i < n; ++i)
-        if (!read_exact(client, &ucmd.addr[i], sizeof(ucmd.addr[i])) ||
-            !read_exact(client, &ucmd.size[i], sizeof(ucmd.size[i]))) {
+        if (!read_client(&ucmd.addr[i], sizeof(ucmd.addr[i])) ||
+            !read_client(&ucmd.size[i], sizeof(ucmd.size[i]))) {
           good = false;
           break;
         }
@@ -1196,12 +1265,11 @@ void handle_client(int client) {
   case zygiskd::Request::PatchText: {
     uint64_t addr = 0;
     uint32_t len = 0;
-    if (!read_exact(client, &addr, sizeof(addr)) ||
-        !read_exact(client, &len, sizeof(len)) || len == 0 ||
-        len > YZ_PATCH_TEXT_MAX)
+    if (!read_client(&addr, sizeof(addr)) || !read_client(&len, sizeof(len)) ||
+        len == 0 || len > YZ_PATCH_TEXT_MAX)
       break;
     uint8_t bytes[YZ_PATCH_TEXT_MAX];
-    if (!read_exact(client, bytes, len))
+    if (!read_client(bytes, len))
       break;
     struct ucred cr{};
     socklen_t crlen = sizeof(cr);
@@ -1220,21 +1288,52 @@ void handle_client(int client) {
   }
   case zygiskd::Request::Log: {
     uint16_t len = 0;
-    if (!read_exact(client, &len, sizeof(len)) || len == 0 || len > 256)
+    if (!read_client(&len, sizeof(len)) || len == 0 || len > 256)
       break;
     char buf[257];
-    if (!read_exact(client, buf, len))
+    if (!read_client(buf, len))
       break;
     buf[len] = '\0';
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+    struct ucred cr{};
+    socklen_t crlen = sizeof(cr);
+    if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) == 0)
+      zygiskd::logging::write(zygiskd::LogLevel::Info,
+                              zygiskd::LogSource::Zygisk, cr.pid, cr.uid, buf);
+#else
     dlog("core: %s", buf);
+#endif
     break;
   }
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+  case zygiskd::Request::WriteLog: {
+    zygiskd::LogHeader header{};
+    if (!read_client(&header, sizeof(header)) || header.length == 0 ||
+        header.length > zygiskd::kLogMessageMax ||
+        static_cast<uint8_t>(header.level) >
+            static_cast<uint8_t>(zygiskd::LogLevel::Error) ||
+        static_cast<uint8_t>(header.source) <
+            static_cast<uint8_t>(zygiskd::LogSource::Zygisk) ||
+        static_cast<uint8_t>(header.source) >
+            static_cast<uint8_t>(zygiskd::LogSource::Linker))
+      break;
+    char buf[zygiskd::kLogMessageMax + 1];
+    if (!read_client(buf, header.length))
+      break;
+    buf[header.length] = '\0';
+    struct ucred cr{};
+    socklen_t crlen = sizeof(cr);
+    if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) == 0)
+      zygiskd::logging::write(header.level, header.source, cr.pid, cr.uid, buf);
+    break;
+  }
+#endif
   case zygiskd::Request::ReportZygote: {
     struct ucred cr{};
     socklen_t crlen = sizeof(cr);
     uint32_t generation = 0;
     uint8_t ok = 0;
-    if (read_exact(client, &generation, sizeof(generation)) &&
+    if (read_client(&generation, sizeof(generation)) &&
         getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) == 0 &&
         cr.pid > 0)
       ok = report_runtime(cr.pid, YZ_RUNTIME_KIND_ZYGOTE, generation) ? 1 : 0;
@@ -1246,7 +1345,7 @@ void handle_client(int client) {
     socklen_t crlen = sizeof(cr);
     uint8_t kind = 0;
     uint32_t generation = 0;
-    if (read_exact(client, &kind, sizeof(kind)) &&
+    if (read_client(&kind, sizeof(kind)) &&
         getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) == 0 &&
         cr.pid > 0)
       generation = runtime_generation(cr.pid, kind);
@@ -1261,8 +1360,7 @@ void handle_client(int client) {
   case zygiskd::Request::GetNativeModuleInfo: {
     uint32_t idx = 0;
     zygiskd::NativeModuleInfo info{};
-    if (read_exact(client, &idx, sizeof(idx)) &&
-        idx < g_native_modules.size()) {
+    if (read_client(&idx, sizeof(idx)) && idx < g_native_modules.size()) {
       const NativeModule &m = g_native_modules[idx];
       info.target_type = m.target_type;
       info.has_companion = m.has_companion ? 1 : 0;
@@ -1276,8 +1374,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::GetNativeModuleFd: {
     uint32_t idx = 0;
-    if (!read_exact(client, &idx, sizeof(idx)) ||
-        idx >= g_native_modules.size()) {
+    if (!read_client(&idx, sizeof(idx)) || idx >= g_native_modules.size()) {
       send_fd(client, -1);
       break;
     }
@@ -1290,8 +1387,7 @@ void handle_client(int client) {
   }
   case zygiskd::Request::ConnectNativeCompanion: {
     uint32_t idx = 0;
-    if (!read_exact(client, &idx, sizeof(idx)) ||
-        !ensure_native_companion(idx)) {
+    if (!read_client(&idx, sizeof(idx)) || !ensure_native_companion(idx)) {
       send_fd(client, -1);
       break;
     }
@@ -1332,8 +1428,8 @@ void handle_client(int client) {
     uint32_t idx = 0;
     uint32_t generation = 0;
     uint8_t ok = 0;
-    if (read_exact(client, &idx, sizeof(idx)) &&
-        read_exact(client, &generation, sizeof(generation)) &&
+    if (read_client(&idx, sizeof(idx)) &&
+        read_client(&generation, sizeof(generation)) &&
         getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) == 0 &&
         cr.pid > 0 && idx < g_native_modules.size())
       ok = report_runtime(cr.pid, YZ_RUNTIME_KIND_NATIVE, generation,
@@ -1407,9 +1503,15 @@ void nl_drain(int fd) {
         nlh->nlmsg_len >= NLMSG_LENGTH(sizeof(yz_event))) {
       auto *ev = static_cast<yz_event *>(NLMSG_DATA(nlh));
       if (ev->type == YZ_EV_RELOAD) {
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+        read_yzconfig();
+        DLOGI("reload event");
+        rescan_modules();
+#else
         DLOGI("reload event");
         rescan_modules();
         read_yzconfig();
+#endif
         (void)yzpolicy::refresh(true);
       } else if (ev->type == YZ_EV_SAFEMODE) {
         DLOGI("safemode event pid=%u crashes=%u", ev->pid, ev->appid);
@@ -1545,6 +1647,9 @@ int run_daemon() {
     notify_ready(ready_fd, false);
     return 1;
   }
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+  read_yzconfig();
+#endif
   yz_root_status_cmd root_status{};
   if (!yzhost::get_root_status(&root_status) ||
       !yzpolicy::setup(yzhost::g_control_fd, root_status)) {
@@ -1555,8 +1660,12 @@ int run_daemon() {
     return 1;
   }
 
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+  rescan_modules();
+#else
   rescan_modules();
   read_yzconfig();
+#endif
   if (!send_dlopen_offset()) {
     DLOGE("linker offsets unavailable; exiting");
     close(nlfd);

@@ -15,10 +15,14 @@ else()
     "YukiZygisk daemon only supports arm64-v8a and armeabi-v7a")
 endif()
 
-add_executable(${ZYGISKD_TARGET}
+set(ZYGISKD_SOURCES
   root_policy.cpp
-  zygiskd.cpp
-)
+  zygiskd.cpp)
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+  list(APPEND ZYGISKD_SOURCES log.cpp)
+endif()
+
+add_executable(${ZYGISKD_TARGET} ${ZYGISKD_SOURCES})
 
 target_compile_features(${ZYGISKD_TARGET} PRIVATE cxx_std_17)
 target_include_directories(
@@ -28,6 +32,9 @@ target_include_directories(
     ${PROJECT_SOURCE_DIR}/userspace/common
 )
 target_compile_definitions(${ZYGISKD_TARGET} PRIVATE _GNU_SOURCE)
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+  target_compile_definitions(${ZYGISKD_TARGET} PRIVATE YUKIZYGISK_RUNTIME_LOG=1)
+endif()
 
 if(ANDROID)
   target_link_libraries(${ZYGISKD_TARGET} PRIVATE dl)

@@ -431,7 +431,7 @@ bool arm_module_load_policy(int id) {
   return true;
 }
 
-/* dmesg logging via zygiskd. */
+#if !defined(YUKIZYGISK_RUNTIME_LOG)
 extern "C" void yz_klog(const char *fmt, ...) {
   if (g_yz_config.dmesg_log == 0)
     return;
@@ -453,6 +453,7 @@ extern "C" void yz_klog(const char *fmt, ...) {
     (void)!write(s, buf, len);
   close(s);
 }
+#endif
 
 /* Built-in yukilinker symbols. */
 extern "C" {

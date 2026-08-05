@@ -8,6 +8,9 @@
  */
 
 #include "root_policy.hpp"
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+#include "log.hpp"
+#endif
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -81,6 +84,21 @@ static_assert(sizeof(yz_policy_cache_entry) == 8);
 #endif
 
 void log_message(const char *fmt, ...) {
+#if defined(YUKIZYGISK_RUNTIME_LOG)
+  char buf[zygiskd::kLogMessageMax + 1];
+  const int prefix = snprintf(buf, sizeof(buf), "policy fallback: ");
+  if (prefix < 0 || static_cast<size_t>(prefix) >= sizeof(buf))
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  const int length = vsnprintf(
+      buf + prefix, sizeof(buf) - static_cast<size_t>(prefix), fmt, ap);
+  va_end(ap);
+  if (length < 0)
+    return;
+  zygiskd::logging::write(zygiskd::LogLevel::Info, zygiskd::LogSource::Daemon,
+                          getpid(), getuid(), buf);
+#else
   static int kmsg = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
   if (kmsg < 0)
     return;
@@ -97,6 +115,7 @@ void log_message(const char *fmt, ...) {
   if (len >= sizeof(buf))
     len = sizeof(buf) - 1;
   (void)write(kmsg, buf, len);
+#endif
 }
 
 struct SourceStamp {
@@ -109,7 +128,7 @@ struct SourceStamp {
 };
 
 bool read_stamp(const char *path, SourceStamp *out) {
-  struct stat st {};
+  struct stat st{};
   if (stat(path, &st) != 0)
     return false;
   out->dev = st.st_dev;
@@ -135,7 +154,7 @@ bool read_all(const char *path, std::vector<uint8_t> *out) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);
   if (fd < 0)
     return false;
-  struct stat st {};
+  struct stat st{};
   if (fstat(fd, &st) != 0 || st.st_size < 0 ||
       static_cast<uint64_t>(st.st_size) > kMaxPolicyFile) {
     close(fd);
@@ -177,8 +196,7 @@ bool parse_u32(const std::string &text, uint32_t *value) {
   errno = 0;
   char *end = nullptr;
   unsigned long long parsed = strtoull(text.c_str(), &end, 10);
-  if (errno != 0 || end == text.c_str() || *end != '\0' ||
-      parsed > UINT32_MAX)
+  if (errno != 0 || end == text.c_str() || *end != '\0' || parsed > UINT32_MAX)
     return false;
   *value = static_cast<uint32_t>(parsed);
   return true;
@@ -222,7 +240,7 @@ public:
       owns_fd = fd >= 0;
     }
     if (fd >= 0) {
-      KsuGetInfoCmd info {};
+      KsuGetInfoCmd info{};
       if (ioctl(fd, kKsuIoctlGetInfo, &info) == 0 && info.version != 0) {
         fd_ = fd;
         method_ = Method::Ioctl;
@@ -246,7 +264,7 @@ public:
     if (!initialize())
       return false;
     if (method_ == Method::Ioctl) {
-      KsuUidShouldUmountCmd cmd {uid, 0};
+      KsuUidShouldUmountCmd cmd{uid, 0};
       if (ioctl(fd_, kKsuIoctlUidShouldUmount, &cmd) != 0)
         return false;
       *should_umount = cmd.should_umount != 0;
@@ -255,8 +273,7 @@ public:
 
     bool decision = false;
     uint32_t result = 0;
-    (void)prctl(kKsuOption, kKsuCmdUidShouldUmount, uid, &decision,
-                &result);
+    (void)prctl(kKsuOption, kKsuCmdUidShouldUmount, uid, &decision, &result);
     if (result != static_cast<uint32_t>(kKsuOption))
       return false;
     *should_umount = decision;
@@ -268,7 +285,7 @@ public:
       return false;
     uint32_t uid = 0;
     if (method_ == Method::Ioctl) {
-      KsuGetManagerUidCmd cmd {};
+      KsuGetManagerUidCmd cmd{};
       if (ioctl(fd_, kKsuIoctlGetManagerUid, &cmd) == 0) {
         *appid = cmd.uid % 100000U;
         return true;
@@ -288,7 +305,7 @@ public:
         "/data/user_de/0/com.anatdx.yukisu",
     };
     for (const char *path : paths) {
-      struct stat st {};
+      struct stat st{};
       if (stat(path, &st) == 0) {
         *appid = static_cast<uint32_t>(st.st_uid) % 100000U;
         return true;
@@ -378,8 +395,7 @@ bool parse_ksu_uids(std::set<uint32_t> *uids) {
   memcpy(&version, data.data() + sizeof(magic), sizeof(version));
   if (magic != kKsuAllowlistMagic || version < 2 || version > 4)
     return false;
-  size_t record_size = version >= 4 ? kKsuV4ProfileSize :
-                                      kKsuLegacyProfileSize;
+  size_t record_size = version >= 4 ? kKsuV4ProfileSize : kKsuLegacyProfileSize;
   if ((data.size() - 8) % record_size != 0 ||
       (data.size() - 8) / record_size > YZ_POLICY_CACHE_MAX_ENTRIES)
     return false;
@@ -426,8 +442,7 @@ bool parse_apatch(std::map<uint32_t, bool> *decisions) {
 }
 
 bool push_cache() {
-  if (g.control_fd < 0 ||
-      g.decisions.size() > YZ_POLICY_CACHE_MAX_ENTRIES)
+  if (g.control_fd < 0 || g.decisions.size() > YZ_POLICY_CACHE_MAX_ENTRIES)
     return false;
 
   int fd = static_cast<int>(syscall(SYS_memfd_create, "yz_policy_cache",
@@ -437,7 +452,7 @@ bool push_cache() {
     return false;
   }
 
-  yz_policy_cache_header header {};
+  yz_policy_cache_header header{};
   header.magic = YZ_POLICY_CACHE_MAGIC;
   header.version = YZ_POLICY_CACHE_VERSION;
   header.header_size = sizeof(header);
@@ -451,7 +466,7 @@ bool push_cache() {
 
   bool ok = write_all(fd, &header, sizeof(header));
   for (const auto &[uid, decision] : g.decisions) {
-    yz_policy_cache_entry entry {uid, decision ? 1U : 0U};
+    yz_policy_cache_entry entry{uid, decision ? 1U : 0U};
     if (ok)
       ok = write_all(fd, &entry, sizeof(entry));
   }
@@ -459,7 +474,7 @@ bool push_cache() {
     ok = fcntl(fd, F_ADD_SEALS,
                F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) == 0;
   if (ok) {
-    yz_policy_cache_cmd cmd {fd, 0};
+    yz_policy_cache_cmd cmd{fd, 0};
     ok = ioctl(g.control_fd, YZ_IOCTL_SET_POLICY_CACHE, &cmd) == 0;
   }
   if (!ok)
@@ -545,9 +560,10 @@ bool refresh(bool force) {
     ok = refresh_apatch();
   if (ok && have_current)
     g.stamp = current;
-  log_message("refresh owner=%u generation=%u entries=%zu complete=%u result=%u",
-              g.owner, g.generation, g.decisions.size(),
-              g.complete ? 1 : 0, ok ? 1 : 0);
+  log_message(
+      "refresh owner=%u generation=%u entries=%zu complete=%u result=%u",
+      g.owner, g.generation, g.decisions.size(), g.complete ? 1 : 0,
+      ok ? 1 : 0);
   return ok;
 }
 
