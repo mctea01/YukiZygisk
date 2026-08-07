@@ -17,6 +17,7 @@
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <linux/vmalloc.h>
 
 #include "objsec.h"
@@ -48,12 +49,22 @@ static YZ_INDIRECT_CALL void
 yz_policy_commit_edit_locked(struct yz_policy_edit *edit);
 
 typedef int (*yz_policydb_write_fn)(struct policydb *p, void *fp);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 typedef int (*yz_security_load_policy_fn)(
-	void *data, size_t len, struct selinux_load_state *load_state);
+	struct selinux_state *state, void *data, size_t len,
+	struct selinux_load_state *load_state);
+typedef void (*yz_selinux_policy_commit_fn)(
+	struct selinux_state *state, struct selinux_load_state *load_state);
+typedef void (*yz_selinux_policy_cancel_fn)(
+	struct selinux_state *state, struct selinux_load_state *load_state);
+#else
+typedef int (*yz_security_load_policy_fn)(void *data, size_t len,
+					 struct selinux_load_state *load_state);
 typedef void (*yz_selinux_policy_commit_fn)(
 	struct selinux_load_state *load_state);
 typedef void (*yz_selinux_policy_cancel_fn)(
 	struct selinux_load_state *load_state);
+#endif
 typedef void *(*yz_symtab_search_fn)(struct symtab *s, const char *name);
 typedef struct avtab_node *(*yz_avtab_search_node_fn)(
 	struct avtab *h, const struct avtab_key *key);
@@ -581,8 +592,12 @@ yz_policy_begin_edit_locked(struct yz_policy_edit *edit)
 	if (ret)
 		goto out_free;
 
-	ret = yz_security_load_policy(edit->data, edit->len,
-				      &edit->load_state);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	ret = yz_security_load_policy(yz_selinux_state, edit->data, edit->len,
+				     &edit->load_state);
+#else
+	ret = yz_security_load_policy(edit->data, edit->len, &edit->load_state);
+#endif
 	if (ret)
 		goto out_free;
 
@@ -598,7 +613,11 @@ static YZ_INDIRECT_CALL void
 yz_policy_cancel_edit_locked(struct yz_policy_edit *edit)
 {
 	if (edit->load_state.policy)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		yz_selinux_policy_cancel(yz_selinux_state, &edit->load_state);
+#else
 		yz_selinux_policy_cancel(&edit->load_state);
+#endif
 	vfree(edit->data);
 	memset(edit, 0, sizeof(*edit));
 }
@@ -606,7 +625,11 @@ yz_policy_cancel_edit_locked(struct yz_policy_edit *edit)
 static YZ_INDIRECT_CALL void
 yz_policy_commit_edit_locked(struct yz_policy_edit *edit)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	yz_selinux_policy_commit(yz_selinux_state, &edit->load_state);
+#else
 	yz_selinux_policy_commit(&edit->load_state);
+#endif
 	vfree(edit->data);
 	memset(edit, 0, sizeof(*edit));
 }
