@@ -16,6 +16,7 @@
 #include <linux/mutex.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
@@ -27,6 +28,7 @@
 #include "ss/services.h"
 #include "ss/sidtab.h"
 #include "ss/symtab.h"
+#include "xfrm.h"
 
 #include "host/policy_base.h"
 #include "host/policy.h"
@@ -35,60 +37,40 @@
 
 #define YZ_POLICY_PERM_BITS 32
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+extern int avc_ss_reset(u32 seqno);
+#else
+extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
+#endif
+
 struct yz_policy_edit {
-	struct selinux_load_state load_state;
-	void *data;
-	size_t len;
+	struct selinux_policy *old_policy;
+	struct selinux_policy *policy;
 };
 
-static YZ_INDIRECT_CALL int
+static int
 yz_policy_begin_edit_locked(struct yz_policy_edit *edit);
-static YZ_INDIRECT_CALL void
+static void
 yz_policy_cancel_edit_locked(struct yz_policy_edit *edit);
-static YZ_INDIRECT_CALL void
+static void
 yz_policy_commit_edit_locked(struct yz_policy_edit *edit);
-
-typedef int (*yz_policydb_write_fn)(struct policydb *p, void *fp);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-typedef int (*yz_security_load_policy_fn)(
-	struct selinux_state *state, void *data, size_t len,
-	struct selinux_load_state *load_state);
-typedef void (*yz_selinux_policy_commit_fn)(
-	struct selinux_state *state, struct selinux_load_state *load_state);
-typedef void (*yz_selinux_policy_cancel_fn)(
-	struct selinux_state *state, struct selinux_load_state *load_state);
-#else
-typedef int (*yz_security_load_policy_fn)(void *data, size_t len,
-					 struct selinux_load_state *load_state);
-typedef void (*yz_selinux_policy_commit_fn)(
-	struct selinux_load_state *load_state);
-typedef void (*yz_selinux_policy_cancel_fn)(
-	struct selinux_load_state *load_state);
-#endif
-typedef void *(*yz_symtab_search_fn)(struct symtab *s, const char *name);
-typedef struct avtab_node *(*yz_avtab_search_node_fn)(
-	struct avtab *h, const struct avtab_key *key);
-typedef struct avtab_node *(*yz_avtab_insert_nonunique_fn)(
-	struct avtab *h, const struct avtab_key *key,
-	const struct avtab_datum *datum);
-typedef int (*yz_avtab_alloc_fn)(struct avtab *h, u32 nrules);
-typedef void (*yz_avtab_destroy_fn)(struct avtab *h);
-typedef struct sidtab_entry *(*yz_sidtab_search_entry_fn)(struct sidtab *s,
-							  u32 sid);
 
 static DEFINE_MUTEX(yz_policy_lock);
 static struct selinux_state *yz_selinux_state;
 static struct lsm_blob_sizes *yz_selinux_blob_sizes;
-static yz_policydb_write_fn yz_policydb_write;
-static yz_security_load_policy_fn yz_security_load_policy;
-static yz_selinux_policy_commit_fn yz_selinux_policy_commit;
-static yz_selinux_policy_cancel_fn yz_selinux_policy_cancel;
-static yz_symtab_search_fn yz_symtab_search_ptr;
-static yz_avtab_search_node_fn yz_avtab_search_node_ptr;
-static yz_avtab_insert_nonunique_fn yz_avtab_insert_nonunique_ptr;
-static yz_avtab_alloc_fn yz_avtab_alloc_ptr;
-static yz_avtab_destroy_fn yz_avtab_destroy_ptr;
-static yz_sidtab_search_entry_fn yz_sidtab_search_entry_ptr;
+static typeof(&policydb_write) yz_policydb_write;
+static typeof(&policydb_read) yz_policydb_read;
+static typeof(&policydb_destroy) yz_policydb_destroy;
+static typeof(&symtab_search) yz_symtab_search;
+static typeof(&avtab_search_node) yz_avtab_search_node;
+static typeof(&avtab_insert_nonunique) yz_avtab_insert_nonunique;
+static typeof(&avtab_alloc) yz_avtab_alloc;
+static typeof(&avtab_destroy) yz_avtab_destroy;
+static typeof(&sidtab_search_entry) yz_sidtab_search_entry;
+static typeof(&avc_ss_reset) yz_avc_ss_reset;
+static typeof(&selnl_notify_policyload) yz_selnl_notify_policyload;
+static typeof(&selinux_status_update_policyload)
+	yz_selinux_status_update_policyload;
 
 static const char *const yz_file_load_perms[] = {
 	"read", "open", "getattr", "map", "execute",
@@ -172,11 +154,11 @@ static const struct yz_runtime_policy_class yz_runtime_policy_classes[] = {
 bool yz_policy_base_ready(void)
 {
 	return yz_selinux_state && yz_selinux_blob_sizes && yz_policydb_write &&
-	       yz_security_load_policy && yz_selinux_policy_commit &&
-	       yz_selinux_policy_cancel && yz_symtab_search_ptr &&
-	       yz_avtab_search_node_ptr && yz_avtab_insert_nonunique_ptr &&
-	       yz_avtab_alloc_ptr && yz_avtab_destroy_ptr &&
-	       yz_sidtab_search_entry_ptr;
+	       yz_policydb_read && yz_policydb_destroy && yz_symtab_search &&
+	       yz_avtab_search_node && yz_avtab_insert_nonunique &&
+	       yz_avtab_alloc && yz_avtab_destroy && yz_sidtab_search_entry &&
+	       yz_avc_ss_reset && yz_selnl_notify_policyload &&
+	       yz_selinux_status_update_policyload;
 }
 
 static struct task_security_struct *yz_policy_cred_security(
@@ -195,15 +177,15 @@ yz_policy_inode_security(const struct inode *inode)
 	return inode->i_security + yz_selinux_blob_sizes->lbs_inode;
 }
 
-static YZ_INDIRECT_CALL struct context *
+static struct context *
 yz_policy_sidtab_search(struct sidtab *sidtab, u32 sid)
 {
 	struct sidtab_entry *entry;
 
-	if (!sidtab || !sid || !yz_sidtab_search_entry_ptr)
+	if (!sidtab || !sid || !yz_sidtab_search_entry)
 		return NULL;
 
-	entry = yz_sidtab_search_entry_ptr(sidtab, sid);
+	entry = yz_sidtab_search_entry(sidtab, sid);
 	return entry ? &entry->context : NULL;
 }
 
@@ -234,14 +216,14 @@ static const char *yz_policy_class_name_by_value(struct policydb *db,
 	return db->sym_val_to_name[SYM_CLASSES][tclass - 1];
 }
 
-static YZ_INDIRECT_CALL u32
+static u32
 yz_policy_type_value_by_name(struct policydb *db, const char *name)
 {
 	struct type_datum *type;
 
 	if (!db || !name)
 		return 0;
-	type = yz_symtab_search_ptr(&db->p_types, name);
+	type = yz_symtab_search(&db->p_types, name);
 	return type ? type->value : 0;
 }
 
@@ -258,7 +240,7 @@ static void yz_policy_copy_type_name(char *dst, size_t dst_size,
 		strscpy(dst, "-", dst_size);
 }
 
-static YZ_INDIRECT_CALL u32
+static u32
 yz_policy_perm_mask(struct class_datum *cls, const char *perm_name)
 {
 	struct perm_datum *perm;
@@ -266,10 +248,9 @@ yz_policy_perm_mask(struct class_datum *cls, const char *perm_name)
 	if (!cls || !perm_name)
 		return 0;
 
-	perm = yz_symtab_search_ptr(&cls->permissions, perm_name);
+	perm = yz_symtab_search(&cls->permissions, perm_name);
 	if (!perm && cls->comdatum)
-		perm = yz_symtab_search_ptr(&cls->comdatum->permissions,
-					    perm_name);
+		perm = yz_symtab_search(&cls->comdatum->permissions, perm_name);
 	if (!perm || perm->value == 0 || perm->value > YZ_POLICY_PERM_BITS)
 		return 0;
 
@@ -288,7 +269,7 @@ static u32 yz_policy_required_av(struct class_datum *cls,
 	return av;
 }
 
-static YZ_INDIRECT_CALL u32
+static u32
 yz_policy_direct_allowed_av_locked(struct policydb *db,
 				   const struct yz_policy_key *key)
 {
@@ -300,7 +281,7 @@ yz_policy_direct_allowed_av_locked(struct policydb *db,
 	avkey.target_class = key->tclass;
 	avkey.specified = AVTAB_ALLOWED;
 
-	node = yz_avtab_search_node_ptr(&db->te_avtab, &avkey);
+	node = yz_avtab_search_node(&db->te_avtab, &avkey);
 	return node ? node->datum.u.data : 0;
 }
 
@@ -320,7 +301,7 @@ u32 yz_policy_base_direct_allowed_av(const struct yz_policy_key *key)
 	return yz_policy_direct_allowed_av_locked(&policy->policydb, key);
 }
 
-static YZ_INDIRECT_CALL struct avtab_node *
+static struct avtab_node *
 yz_policy_get_avtab_node(struct policydb *db,
 			 const struct yz_policy_key *key)
 {
@@ -333,11 +314,11 @@ yz_policy_get_avtab_node(struct policydb *db,
 	avkey.target_class = key->tclass;
 	avkey.specified = AVTAB_ALLOWED;
 
-	node = yz_avtab_search_node_ptr(&db->te_avtab, &avkey);
+	node = yz_avtab_search_node(&db->te_avtab, &avkey);
 	if (node)
 		return node;
 
-	node = yz_avtab_insert_nonunique_ptr(&db->te_avtab, &avkey, &datum);
+	node = yz_avtab_insert_nonunique(&db->te_avtab, &avkey, &datum);
 	if (node)
 		db->len += sizeof(struct avtab_key) +
 			   sizeof(struct avtab_datum);
@@ -345,7 +326,7 @@ yz_policy_get_avtab_node(struct policydb *db,
 	return node;
 }
 
-static YZ_INDIRECT_CALL bool
+static bool
 yz_policy_remove_avtab_node(struct policydb *db, struct avtab_node *node)
 {
 	struct avtab removed = {};
@@ -354,7 +335,7 @@ yz_policy_remove_avtab_node(struct policydb *db, struct avtab_node *node)
 	int ret;
 	size_t i;
 
-	ret = yz_avtab_alloc_ptr(&removed, 1);
+	ret = yz_avtab_alloc(&removed, 1);
 	if (ret < 0)
 		return false;
 
@@ -373,18 +354,18 @@ yz_policy_remove_avtab_node(struct policydb *db, struct avtab_node *node)
 			cur->next = NULL;
 			removed.htable[0] = cur;
 			removed.nel = 1;
-			yz_avtab_destroy_ptr(&removed);
+			yz_avtab_destroy(&removed);
 			db->len -= sizeof(struct avtab_key) +
 				   sizeof(struct avtab_datum);
 			return true;
 		}
 	}
 
-	yz_avtab_destroy_ptr(&removed);
+	yz_avtab_destroy(&removed);
 	return false;
 }
 
-static YZ_INDIRECT_CALL int
+static int
 yz_policy_apply_av(struct policydb *db, const struct yz_policy_key *key,
 		   u32 av, bool allow)
 {
@@ -405,7 +386,7 @@ yz_policy_apply_av(struct policydb *db, const struct yz_policy_key *key,
 		return 0;
 	}
 
-	node = yz_avtab_search_node_ptr(
+	node = yz_avtab_search_node(
 		&db->te_avtab,
 		&(struct avtab_key){
 			.source_type = key->src_type,
@@ -423,7 +404,7 @@ yz_policy_apply_av(struct policydb *db, const struct yz_policy_key *key,
 	return 0;
 }
 
-static YZ_INDIRECT_CALL int yz_policy_allow_all_sources(
+static int yz_policy_allow_all_sources(
 	struct policydb *db, u32 target_type,
 	const struct yz_runtime_policy_class *spec)
 {
@@ -434,7 +415,7 @@ static YZ_INDIRECT_CALL int yz_policy_allow_all_sources(
 	u32 av;
 	u32 src_type;
 
-	cls = yz_symtab_search_ptr(&db->p_classes, spec->name);
+	cls = yz_symtab_search(&db->p_classes, spec->name);
 	if (!cls || cls->value > U16_MAX)
 		return spec->optional ? 0 : -ENOENT;
 
@@ -450,7 +431,7 @@ static YZ_INDIRECT_CALL int yz_policy_allow_all_sources(
 
 		if (!name)
 			continue;
-		type = yz_symtab_search_ptr(&db->p_types, name);
+		type = yz_symtab_search(&db->p_types, name);
 		if (!type || type->attribute)
 			continue;
 
@@ -463,7 +444,7 @@ static YZ_INDIRECT_CALL int yz_policy_allow_all_sources(
 	return 0;
 }
 
-static YZ_INDIRECT_CALL int yz_policy_allow_named(
+static int yz_policy_allow_named(
 	struct policydb *db, const char *source, const char *target,
 	const char *class_name, const char *const *perms, size_t perm_count)
 {
@@ -473,9 +454,9 @@ static YZ_INDIRECT_CALL int yz_policy_allow_named(
 	struct yz_policy_key key;
 	u32 av;
 
-	source_type = yz_symtab_search_ptr(&db->p_types, source);
-	target_type = yz_symtab_search_ptr(&db->p_types, target);
-	cls = yz_symtab_search_ptr(&db->p_classes, class_name);
+	source_type = yz_symtab_search(&db->p_types, source);
+	target_type = yz_symtab_search(&db->p_types, target);
+	cls = yz_symtab_search(&db->p_classes, class_name);
 	if (!source_type || source_type->attribute || !target_type ||
 	    target_type->attribute || !cls || source_type->value > U16_MAX ||
 	    target_type->value > U16_MAX || cls->value > U16_MAX)
@@ -536,14 +517,14 @@ int yz_host_policy_prepare_runtime_current(void)
 
 	for (i = 0; i < ARRAY_SIZE(yz_runtime_policy_classes); i++) {
 		ret = yz_policy_allow_all_sources(
-			&edit.load_state.policy->policydb, target_type,
+			&edit.policy->policydb, target_type,
 			&yz_runtime_policy_classes[i]);
 		if (ret)
 			goto out_cancel;
 	}
 
 	ret = yz_policy_allow_named(
-		&edit.load_state.policy->policydb, "system_server",
+		&edit.policy->policydb, "system_server",
 		"system_server", "process", yz_process_execmem_perms,
 		ARRAY_SIZE(yz_process_execmem_perms));
 	if (ret)
@@ -562,12 +543,90 @@ out_unlock:
 	return ret;
 }
 
-static YZ_INDIRECT_CALL int
+static void yz_policy_destroy(struct selinux_policy *policy)
+{
+	if (!policy)
+		return;
+	yz_policydb_destroy(&policy->policydb);
+	kfree(policy);
+}
+
+static struct selinux_policy *
+yz_policy_dup(struct selinux_policy *old_policy)
+{
+	struct selinux_policy *policy;
+	struct policy_file fp;
+	void *data;
+	size_t len;
+	int ret;
+
+	len = old_policy->policydb.len;
+	data = vmalloc(len);
+	if (!data)
+		return ERR_PTR(-ENOMEM);
+
+	fp.data = data;
+	fp.len = len;
+	ret = yz_policydb_write(&old_policy->policydb, &fp);
+	if (ret)
+		goto out_free_data;
+
+#ifdef POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE
+	if (len >= 24) {
+		__le32 *config_ptr = (__le32 *)((u8 *)data + 20);
+		u32 config = le32_to_cpu(*config_ptr);
+
+		if (old_policy->policydb.android_netlink_route)
+			config |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
+#ifdef POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH
+		if (old_policy->policydb.android_netlink_getneigh)
+			config |= POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH;
+#endif
+		*config_ptr = cpu_to_le32(config);
+	}
+#endif
+
+	policy = kmemdup(old_policy, sizeof(*old_policy), GFP_KERNEL);
+	if (!policy) {
+		ret = -ENOMEM;
+		goto out_free_data;
+	}
+	memset(&policy->policydb, 0, sizeof(policy->policydb));
+
+	fp.data = data;
+	fp.len = len;
+	ret = yz_policydb_read(&policy->policydb, &fp);
+	if (ret)
+		goto out_free_policy;
+	policy->policydb.len = old_policy->policydb.len;
+	vfree(data);
+	return policy;
+
+out_free_policy:
+	kfree(policy);
+out_free_data:
+	vfree(data);
+	return ERR_PTR(ret);
+}
+
+static void yz_policy_reset_avc(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	yz_avc_ss_reset(0);
+	yz_selnl_notify_policyload(0);
+	yz_selinux_status_update_policyload(0);
+#else
+	yz_avc_ss_reset(yz_selinux_state->avc, 0);
+	yz_selnl_notify_policyload(0);
+	yz_selinux_status_update_policyload(yz_selinux_state, 0);
+#endif
+	selinux_xfrm_notify_policyload();
+}
+
+static int
 yz_policy_begin_edit_locked(struct yz_policy_edit *edit)
 {
-	struct selinux_policy *old_pol;
-	struct policy_file fp;
-	int ret;
+	struct selinux_policy *old_policy;
 
 	memset(edit, 0, sizeof(*edit));
 	if (!yz_policy_base_ready())
@@ -575,62 +634,37 @@ yz_policy_begin_edit_locked(struct yz_policy_edit *edit)
 	if (!smp_load_acquire(&yz_selinux_state->initialized))
 		return -EAGAIN;
 
-	old_pol = rcu_dereference_protected(
+	old_policy = rcu_dereference_protected(
 		yz_selinux_state->policy,
 		lockdep_is_held(&yz_selinux_state->policy_mutex));
-	if (!old_pol)
+	if (!old_policy)
 		return -ENOENT;
 
-	edit->len = old_pol->policydb.len;
-	edit->data = vmalloc(edit->len);
-	if (!edit->data)
-		return -ENOMEM;
+	edit->policy = yz_policy_dup(old_policy);
+	if (IS_ERR(edit->policy)) {
+		int ret = PTR_ERR(edit->policy);
 
-	fp.data = edit->data;
-	fp.len = edit->len;
-	ret = yz_policydb_write(&old_pol->policydb, &fp);
-	if (ret)
-		goto out_free;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-	ret = yz_security_load_policy(yz_selinux_state, edit->data, edit->len,
-				     &edit->load_state);
-#else
-	ret = yz_security_load_policy(edit->data, edit->len, &edit->load_state);
-#endif
-	if (ret)
-		goto out_free;
-
+		memset(edit, 0, sizeof(*edit));
+		return ret;
+	}
+	edit->old_policy = old_policy;
 	return 0;
-
-out_free:
-	vfree(edit->data);
-	memset(edit, 0, sizeof(*edit));
-	return ret;
 }
 
-static YZ_INDIRECT_CALL void
+static void
 yz_policy_cancel_edit_locked(struct yz_policy_edit *edit)
 {
-	if (edit->load_state.policy)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-		yz_selinux_policy_cancel(yz_selinux_state, &edit->load_state);
-#else
-		yz_selinux_policy_cancel(&edit->load_state);
-#endif
-	vfree(edit->data);
+	yz_policy_destroy(edit->policy);
 	memset(edit, 0, sizeof(*edit));
 }
 
-static YZ_INDIRECT_CALL void
+static void
 yz_policy_commit_edit_locked(struct yz_policy_edit *edit)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-	yz_selinux_policy_commit(yz_selinux_state, &edit->load_state);
-#else
-	yz_selinux_policy_commit(&edit->load_state);
-#endif
-	vfree(edit->data);
+	rcu_assign_pointer(yz_selinux_state->policy, edit->policy);
+	synchronize_rcu();
+	yz_policy_destroy(edit->old_policy);
+	yz_policy_reset_avc();
 	memset(edit, 0, sizeof(*edit));
 }
 
@@ -654,25 +688,25 @@ int yz_policy_base_commit_allow_locked(const struct yz_policy_key *file_key,
 		return ret;
 
 	if (file_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 file_key, file_av, true);
 		if (ret)
 			goto out_cancel;
 	}
 	if (dir_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 dir_key, dir_av, true);
 		if (ret)
 			goto out_cancel;
 	}
 	if (tmpfs_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 tmpfs_key, tmpfs_av, true);
 		if (ret)
 			goto out_cancel;
 	}
 	if (process_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 process_key, process_av, true);
 		if (ret)
 			goto out_cancel;
@@ -703,25 +737,25 @@ int yz_policy_base_commit_restore_locked(
 		return ret;
 
 	if (file_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 file_key, file_av, false);
 		if (ret)
 			goto out_cancel;
 	}
 	if (dir_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 dir_key, dir_av, false);
 		if (ret)
 			goto out_cancel;
 	}
 	if (tmpfs_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 tmpfs_key, tmpfs_av, false);
 		if (ret)
 			goto out_cancel;
 	}
 	if (process_av) {
-		ret = yz_policy_apply_av(&edit.load_state.policy->policydb,
+		ret = yz_policy_apply_av(&edit.policy->policydb,
 					 process_key, process_av, false);
 		if (ret)
 			goto out_cancel;
@@ -755,7 +789,7 @@ void yz_policy_base_unlock(void)
 	mutex_unlock(&yz_policy_lock);
 }
 
-YZ_INDIRECT_CALL int
+int
 yz_policy_base_get_file_load_keys(
 	struct file *file, const struct cred *cred, bool include_dir,
 	enum yz_policy_tmpfs_access tmpfs_access,
@@ -818,7 +852,7 @@ yz_policy_base_get_file_load_keys(
 	if (!scontext || !tcontext)
 		return -ENOENT;
 
-	cls = yz_symtab_search_ptr(&db->p_classes, "file");
+	cls = yz_symtab_search(&db->p_classes, "file");
 	if (!cls || cls->value > U16_MAX)
 		return -ENOENT;
 
@@ -829,7 +863,7 @@ yz_policy_base_get_file_load_keys(
 		cls, yz_file_load_perms, ARRAY_SIZE(yz_file_load_perms));
 
 	if (include_dir) {
-		cls = yz_symtab_search_ptr(&db->p_classes, "dir");
+		cls = yz_symtab_search(&db->p_classes, "dir");
 		if (!cls || cls->value > U16_MAX)
 			return -ENOENT;
 		keys->dir.src_type = scontext->type;
@@ -843,7 +877,7 @@ yz_policy_base_get_file_load_keys(
 			     yz_policy_type_value_by_name(db, "tmpfs") :
 			     0;
 	if (tmpfs_type) {
-		cls = yz_symtab_search_ptr(&db->p_classes, "file");
+		cls = yz_symtab_search(&db->p_classes, "file");
 		if (!cls || cls->value > U16_MAX)
 			return -ENOENT;
 		keys->tmpfs.src_type = scontext->type;
@@ -860,7 +894,7 @@ yz_policy_base_get_file_load_keys(
 	return 0;
 }
 
-YZ_INDIRECT_CALL int
+int
 yz_policy_base_get_execmem_key(const struct cred *cred,
 			       struct yz_policy_key *key, u32 *required_av,
 			       char *src_name, size_t src_name_size)
@@ -892,7 +926,7 @@ yz_policy_base_get_execmem_key(const struct cred *cred,
 	if (!scontext)
 		return -ENOENT;
 
-	cls = yz_symtab_search_ptr(&db->p_classes, "process");
+	cls = yz_symtab_search(&db->p_classes, "process");
 	if (!cls || cls->value > U16_MAX)
 		return -ENOENT;
 
@@ -915,37 +949,35 @@ int yz_host_policy_init(void)
 		(void *)yz_lookup_name_quiet("selinux_blob_sizes");
 	yz_policydb_write =
 		(void *)yz_lookup_callable_quiet("policydb_write");
-	yz_security_load_policy =
-		(void *)yz_lookup_callable_quiet("security_load_policy");
-	yz_selinux_policy_commit =
-		(void *)yz_lookup_callable_quiet("selinux_policy_commit");
-	yz_selinux_policy_cancel =
-		(void *)yz_lookup_callable_quiet("selinux_policy_cancel");
-	yz_symtab_search_ptr =
+	yz_policydb_read =
+		(void *)yz_lookup_callable_quiet("policydb_read");
+	yz_policydb_destroy =
+		(void *)yz_lookup_callable_quiet("policydb_destroy");
+	yz_symtab_search =
 		(void *)yz_lookup_callable_quiet("symtab_search");
-	yz_avtab_search_node_ptr =
+	yz_avtab_search_node =
 		(void *)yz_lookup_callable_quiet("avtab_search_node");
-	yz_avtab_insert_nonunique_ptr =
+	yz_avtab_insert_nonunique =
 		(void *)yz_lookup_callable_quiet("avtab_insert_nonunique");
-	yz_avtab_alloc_ptr =
+	yz_avtab_alloc =
 		(void *)yz_lookup_callable_quiet("avtab_alloc");
-	yz_avtab_destroy_ptr =
+	yz_avtab_destroy =
 		(void *)yz_lookup_callable_quiet("avtab_destroy");
-	yz_sidtab_search_entry_ptr =
+	yz_sidtab_search_entry =
 		(void *)yz_lookup_callable_quiet("sidtab_search_entry");
-
+	yz_avc_ss_reset =
+		(void *)yz_lookup_callable_quiet("avc_ss_reset");
+	yz_selnl_notify_policyload =
+		(void *)yz_lookup_callable_quiet("selnl_notify_policyload");
+	yz_selinux_status_update_policyload =
+		(void *)yz_lookup_callable_quiet(
+			"selinux_status_update_policyload");
 	if (!yz_policy_base_ready()) {
-		pr_warn("yukizygisk: SELinux policy backend unavailable state=%px blob=%px write=%px load=%px commit=%px cancel=%px symtab=%px avtab=%px insert=%px sidtab=%px\n",
-			yz_selinux_state, yz_selinux_blob_sizes,
-			yz_policydb_write, yz_security_load_policy,
-			yz_selinux_policy_commit, yz_selinux_policy_cancel,
-			yz_symtab_search_ptr, yz_avtab_search_node_ptr,
-			yz_avtab_insert_nonunique_ptr,
-			yz_sidtab_search_entry_ptr);
+		pr_warn("yukizygisk: KernelSU-style SELinux policy backend unavailable\n");
 		return 0;
 	}
 
-	pr_info("yukizygisk: SELinux policy backend available\n");
+	pr_info("yukizygisk: KernelSU-style SELinux policy backend available\n");
 	return 0;
 }
 
@@ -956,15 +988,17 @@ void yz_host_policy_exit(void)
 	yz_selinux_state = NULL;
 	yz_selinux_blob_sizes = NULL;
 	yz_policydb_write = NULL;
-	yz_security_load_policy = NULL;
-	yz_selinux_policy_commit = NULL;
-	yz_selinux_policy_cancel = NULL;
-	yz_symtab_search_ptr = NULL;
-	yz_avtab_search_node_ptr = NULL;
-	yz_avtab_insert_nonunique_ptr = NULL;
-	yz_avtab_alloc_ptr = NULL;
-	yz_avtab_destroy_ptr = NULL;
-	yz_sidtab_search_entry_ptr = NULL;
+	yz_policydb_read = NULL;
+	yz_policydb_destroy = NULL;
+	yz_symtab_search = NULL;
+	yz_avtab_search_node = NULL;
+	yz_avtab_insert_nonunique = NULL;
+	yz_avtab_alloc = NULL;
+	yz_avtab_destroy = NULL;
+	yz_sidtab_search_entry = NULL;
+	yz_avc_ss_reset = NULL;
+	yz_selnl_notify_policyload = NULL;
+	yz_selinux_status_update_policyload = NULL;
 }
 
 bool yz_host_policy_cred_has_type(const struct cred *cred,

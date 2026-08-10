@@ -1,18 +1,20 @@
-/* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * YukiZygisk - Host runtime symbol resolver.
  *
- * License: Author's work under Apache-2.0; when used as a kernel module
- * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
+ * Derived from KernelSU infra/symbol_resolver.c.
  *
- * Author: Anatdx
+ * License: GPL-2.0-only
+ *
+ * Author: KernelSU contributors and Anatdx
  */
 
 #include <linux/err.h>
 #include <linux/file.h>
 #include <linux/kallsyms.h>
 #include <linux/kprobes.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
+#include <linux/path.h>
 #include <linux/printk.h>
 #include <linux/task_work.h>
 #include <linux/string.h>
@@ -20,11 +22,6 @@
 
 #include "host/root_impl.h"
 #include "host/runtime.h"
-
-static bool yz_skip_kallsyms;
-module_param_named(skip_kallsyms, yz_skip_kallsyms, bool, 0600);
-MODULE_PARM_DESC(skip_kallsyms,
-		 "Skip kallsyms_lookup_name bootstrap and use per-symbol kprobe resolution.");
 
 unsigned long (*yz_kallsyms_lookup_name)(const char *name);
 struct file *(*yz_filp_open)(const char *filename, int flags, umode_t mode);
@@ -40,19 +37,49 @@ static ssize_t (*yz_kernel_write_fn)(struct file *file, const void *buf,
 				     size_t count, loff_t *pos);
 static int (*yz_kern_path_fn)(const char *name, unsigned int flags,
 			      struct path *path);
+static typeof(&path_put) yz_path_put_fn;
 static int (*yz_close_fd_fn)(unsigned int fd);
 static int (*yz_task_work_add_fn)(struct task_struct *task,
 				  struct callback_head *twork,
 				  enum task_work_notify_mode mode);
-static long (*yz_copy_from_kernel_nofault_fn)(void *dst, const void *src,
-					      size_t size);
-static bool yz_copy_from_kernel_nofault_tried;
-/*
- * Keep this pointer tied to the kernel declaration. Unlike private-symbol
- * adapters, this known API is deliberately CFI/KCFI-checked at the call site.
- */
+static typeof(&copy_from_kernel_nofault) yz_copy_from_kernel_nofault_fn;
 static typeof(&kallsyms_lookup_size_offset)
 	yz_kallsyms_lookup_size_offset_fn;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#define YZ_USE_KCFI 1
+#else
+#define YZ_USE_KCFI 0
+#endif
+
+#if !YZ_USE_KCFI
+static const char yz_cfi_suffix[] = ".cfi_jt";
+static const size_t yz_cfi_suffix_len = sizeof(yz_cfi_suffix) - 1;
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+typedef int (*yz_kallsyms_on_each_symbol_fn)(int (*fn)(void *, const char *,
+						       unsigned long),
+					     void *data);
+#else
+typedef int (*yz_kallsyms_on_each_symbol_fn)(int (*fn)(void *, const char *,
+						       struct module *,
+						       unsigned long),
+					     void *data);
+#endif
+
+typedef int (*yz_kallsyms_on_each_match_symbol_fn)(int (*fn)(void *,
+							     unsigned long),
+						 const char *name, void *data);
+
+static yz_kallsyms_on_each_symbol_fn yz_kallsyms_on_each_symbol;
+static yz_kallsyms_on_each_match_symbol_fn yz_kallsyms_on_each_match_symbol;
+
+struct yz_lookup_symbol_ctx {
+	const char *symbol_name;
+	size_t symbol_len;
+	void *match;
+};
 
 bool yz_valid_kernel_addr(unsigned long addr)
 {
@@ -67,135 +94,201 @@ bool yz_valid_kernel_addr(unsigned long addr)
 #endif
 }
 
-YZ_INDIRECT_CALL unsigned long yz_lookup_name(const char *name)
+static int yz_find_kernel_symbol_exact_cb(void *data, unsigned long addr)
 {
-	if (yz_kallsyms_lookup_name) {
-		unsigned long addr = yz_kallsyms_lookup_name(name);
+	*(unsigned long *)data = addr;
+	return 0;
+}
 
-		if (addr && !IS_ERR_VALUE(addr))
+static unsigned long yz_lookup_via_kprobe(const char *name)
+{
+	struct kprobe kp = { .symbol_name = name };
+	unsigned long addr;
+
+	if (register_kprobe(&kp))
+		return 0;
+	addr = (unsigned long)kp.addr;
+	unregister_kprobe(&kp);
+	return yz_valid_kernel_addr(addr) ? addr : 0;
+}
+
+static YZ_INDIRECT_CALL unsigned long
+yz_find_kernel_symbol_exact(const char *name)
+{
+	unsigned long addr = 0;
+
+	if (!name || !name[0])
+		return 0;
+	if (yz_kallsyms_on_each_match_symbol) {
+		yz_kallsyms_on_each_match_symbol(yz_find_kernel_symbol_exact_cb,
+						  name, &addr);
+		if (addr)
 			return addr;
 	}
+	if (yz_kallsyms_lookup_name)
+		return yz_kallsyms_lookup_name(name);
+	return yz_lookup_via_kprobe(name);
+}
 
-	{
-		struct kprobe kp = { .symbol_name = name };
-		unsigned long addr;
-		int ret;
+static bool yz_symbol_has_suffix(const char *name, size_t name_len,
+				 const char *suffix, size_t suffix_len)
+{
+	return name_len >= suffix_len &&
+	       !strcmp(name + name_len - suffix_len, suffix);
+}
 
-		ret = register_kprobe(&kp);
-		if (ret < 0) {
-			pr_alert("yukizygisk: kprobe %s failed: %d\n", name,
-				 ret);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+static int yz_lookup_symbol_variant_cb(void *data, const char *name,
+				       unsigned long addr)
+#else
+static int yz_lookup_symbol_variant_cb(void *data, const char *name,
+				       struct module *mod, unsigned long addr)
+#endif
+{
+	struct yz_lookup_symbol_ctx *ctx = data;
+	size_t name_len;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+	(void)mod;
+#endif
+	if (!name || !addr)
+		return 0;
+
+	name_len = strlen(name);
+	if (strcmp(name, ctx->symbol_name)) {
+		if (name_len <= ctx->symbol_len ||
+		    strncmp(name, ctx->symbol_name, ctx->symbol_len) ||
+		    (name[ctx->symbol_len] != '.' &&
+		     name[ctx->symbol_len] != '$'))
 			return 0;
-		}
-		addr = (unsigned long)kp.addr;
-		unregister_kprobe(&kp);
-		if (!addr || IS_ERR_VALUE(addr)) {
-			pr_alert("yukizygisk: symbol %s invalid addr 0x%lx\n",
-				 name, addr);
-			return 0;
-		}
-		return addr;
 	}
+
+#if !YZ_USE_KCFI
+	if (yz_symbol_has_suffix(name, name_len, yz_cfi_suffix,
+				 yz_cfi_suffix_len)) {
+		ctx->match = (void *)addr;
+		return 1;
+	}
+#endif
+
+	if (!ctx->match) {
+		ctx->match = (void *)addr;
+#if YZ_USE_KCFI
+		return 1;
+#endif
+	}
+
+	return 0;
+}
+
+static YZ_INDIRECT_CALL void *
+yz_resolve_symbol_variant(const char *name, size_t name_len)
+{
+	struct yz_lookup_symbol_ctx ctx = {
+		.symbol_name = name,
+		.symbol_len = name_len,
+	};
+
+	if (yz_kallsyms_on_each_symbol)
+		yz_kallsyms_on_each_symbol(yz_lookup_symbol_variant_cb, &ctx);
+	return ctx.match;
+}
+
+static YZ_INDIRECT_CALL unsigned long
+yz_resolve_callable(const char *name)
+{
+	void *addr;
+	size_t name_len;
+
+	if (!name || !name[0])
+		return 0;
+	name_len = strlen(name);
+
+#if !YZ_USE_KCFI
+	{
+		char cfi_name[KSYM_NAME_LEN];
+		int len = snprintf(cfi_name, sizeof(cfi_name), "%s.cfi_jt",
+				   name);
+
+		if (len > 0 && (size_t)len < sizeof(cfi_name)) {
+			addr = (void *)yz_find_kernel_symbol_exact(cfi_name);
+			if (addr)
+				return (unsigned long)addr;
+		}
+	}
+
+	addr = yz_resolve_symbol_variant(name, name_len);
+	if (addr)
+		return (unsigned long)addr;
+	return yz_find_kernel_symbol_exact(name);
+#else
+	addr = (void *)yz_find_kernel_symbol_exact(name);
+	if (addr)
+		return (unsigned long)addr;
+	return (unsigned long)yz_resolve_symbol_variant(name, name_len);
+#endif
+}
+
+YZ_INDIRECT_CALL unsigned long yz_lookup_name(const char *name)
+{
+	unsigned long addr = yz_find_kernel_symbol_exact(name);
+
+	if (!addr || IS_ERR_VALUE(addr)) {
+		pr_alert("yukizygisk: symbol %s unavailable\n", name);
+		return 0;
+	}
+	return addr;
 }
 
 YZ_INDIRECT_CALL unsigned long yz_lookup_name_quiet(const char *name)
 {
-	if (yz_kallsyms_lookup_name) {
-		unsigned long addr = yz_kallsyms_lookup_name(name);
+	unsigned long addr = yz_find_kernel_symbol_exact(name);
 
-		if (addr && !IS_ERR_VALUE(addr))
-			return addr;
-	}
-
-	{
-		struct kprobe kp = { .symbol_name = name };
-		unsigned long addr;
-		int ret;
-
-		ret = register_kprobe(&kp);
-		if (ret < 0)
-			return 0;
-		addr = (unsigned long)kp.addr;
-		unregister_kprobe(&kp);
-		if (!addr || IS_ERR_VALUE(addr))
-			return 0;
-		return addr;
-	}
+	return addr && !IS_ERR_VALUE(addr) ? addr : 0;
 }
 
 YZ_INDIRECT_CALL unsigned long yz_lookup_callable(const char *name)
 {
-	/*
-	 * Old jump-table CFI kernels only accept the generated .cfi_jt thunk
-	 * as an indirect-call target. KCFI kernels accept the raw entry, and
-	 * symbols without a thunk also need that raw fallback. This order is
-	 * intentionally identical to Kasumi's callable resolver.
-	 */
-	if (yz_kallsyms_lookup_name) {
-		char jt[256];
-		unsigned long addr;
+	unsigned long addr = yz_resolve_callable(name);
 
-		if (snprintf(jt, sizeof(jt), "%s.cfi_jt", name) <
-		    (int)sizeof(jt)) {
-			addr = yz_kallsyms_lookup_name(jt);
-			if (addr && !IS_ERR_VALUE(addr))
-				return addr;
-		}
+	if (!addr || IS_ERR_VALUE(addr)) {
+		pr_alert("yukizygisk: callable %s unavailable\n", name);
+		return 0;
 	}
-	return yz_lookup_name(name);
+	return addr;
 }
 
 YZ_INDIRECT_CALL unsigned long yz_lookup_callable_quiet(const char *name)
 {
-	if (yz_kallsyms_lookup_name) {
-		char jt[256];
-		unsigned long addr;
+	unsigned long addr = yz_resolve_callable(name);
 
-		if (snprintf(jt, sizeof(jt), "%s.cfi_jt", name) <
-		    (int)sizeof(jt)) {
-			addr = yz_kallsyms_lookup_name(jt);
-			if (addr && !IS_ERR_VALUE(addr))
-				return addr;
-		}
-	}
-	return yz_lookup_name_quiet(name);
+	return addr && !IS_ERR_VALUE(addr) ? addr : 0;
 }
 
-static void yz_resolve_kallsyms_lookup(void)
+static int yz_init_symbol_resolver(void)
 {
-	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
-	int ret;
+	unsigned long addr = yz_lookup_via_kprobe("kallsyms_lookup_name");
 
-	pr_info("yukizygisk: resolving kallsyms_lookup_name\n");
-	ret = register_kprobe(&kp);
-	if (ret < 0) {
-		pr_warn("yukizygisk: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n",
-			ret);
-		return;
+	if (!addr) {
+		pr_err("yukizygisk: failed to bootstrap kallsyms_lookup_name\n");
+		return -ENOENT;
 	}
-	if (!yz_valid_kernel_addr((unsigned long)kp.addr)) {
-		pr_warn("yukizygisk: invalid kallsyms_lookup_name addr 0x%lx\n",
-			(unsigned long)kp.addr);
-		unregister_kprobe(&kp);
-		return;
-	}
-	yz_kallsyms_lookup_name = (void *)kp.addr;
-	unregister_kprobe(&kp);
-	pr_info("yukizygisk: kallsyms_lookup_name resolved @ 0x%lx\n",
-		(unsigned long)yz_kallsyms_lookup_name);
+	yz_kallsyms_lookup_name = (void *)addr;
+	yz_kallsyms_on_each_symbol =
+		(yz_kallsyms_on_each_symbol_fn)yz_resolve_callable(
+			"kallsyms_on_each_symbol");
+	yz_kallsyms_on_each_match_symbol =
+		(yz_kallsyms_on_each_match_symbol_fn)yz_resolve_callable(
+			"kallsyms_on_each_match_symbol");
+	return 0;
 }
 
-YZ_INDIRECT_CALL bool yz_kernel_read_nofault(void *dst, unsigned long src,
-				     size_t size)
+bool yz_kernel_read_nofault(void *dst, unsigned long src, size_t size)
 {
-	if (!yz_copy_from_kernel_nofault_tried) {
-		unsigned long addr =
-			yz_lookup_callable_quiet("copy_from_kernel_nofault");
-
-		yz_copy_from_kernel_nofault_tried = true;
-		if (addr && yz_valid_kernel_addr(addr))
-			yz_copy_from_kernel_nofault_fn = (void *)addr;
-	}
+	if (!yz_copy_from_kernel_nofault_fn)
+		yz_copy_from_kernel_nofault_fn =
+			(void *)yz_lookup_callable_quiet(
+				"copy_from_kernel_nofault");
 
 	return yz_copy_from_kernel_nofault_fn &&
 	       yz_copy_from_kernel_nofault_fn(dst, (const void *)src, size) == 0;
@@ -203,21 +296,16 @@ YZ_INDIRECT_CALL bool yz_kernel_read_nofault(void *dst, unsigned long src,
 
 __attribute__((__noinline__)) bool
 yz_lookup_size_offset(unsigned long addr, unsigned long *symbolsize,
-			      unsigned long *offset)
+		      unsigned long *offset)
 {
 	if (!yz_kallsyms_lookup_size_offset_fn) {
 		unsigned long sym;
 
-		/*
-		 * Match official KernelSU's resolver split: KCFI uses the raw
-		 * entry; old jump-table CFI prefers the generated callable thunk.
-		 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if YZ_USE_KCFI
 		sym = yz_lookup_name_quiet("kallsyms_lookup_size_offset");
 #else
 		sym = yz_lookup_callable_quiet("kallsyms_lookup_size_offset");
 #endif
-
 		if (sym && yz_valid_kernel_addr(sym))
 			yz_kallsyms_lookup_size_offset_fn = (void *)sym;
 	}
@@ -283,6 +371,12 @@ YZ_INDIRECT_CALL int yz_kern_path(const char *name, unsigned int flags,
 	return yz_kern_path_fn ? yz_kern_path_fn(name, flags, path) : -ENOENT;
 }
 
+void yz_path_put(const struct path *path)
+{
+	if (yz_path_put_fn)
+		yz_path_put_fn(path);
+}
+
 YZ_INDIRECT_CALL int yz_close_fd(unsigned int fd)
 {
 	return yz_close_fd_fn ? yz_close_fd_fn(fd) : -ENOENT;
@@ -313,6 +407,7 @@ static int yz_resolve_runtime_symbols(void)
 	yz_kernel_write_fn =
 		(void *)yz_lookup_callable_quiet("kernel_write");
 	yz_kern_path_fn = (void *)yz_lookup_callable_quiet("kern_path");
+	yz_path_put_fn = (void *)yz_lookup_callable_quiet("path_put");
 	yz_close_fd_fn = (void *)yz_lookup_callable_quiet("close_fd");
 	yz_task_work_add_fn =
 		(void *)yz_lookup_callable_quiet("task_work_add");
@@ -320,15 +415,17 @@ static int yz_resolve_runtime_symbols(void)
 	if (!yz_prepare_creds_fn || !yz_abort_creds_fn ||
 	    !yz_override_creds_fn || !yz_revert_creds_fn || !yz_filp_open ||
 	    !yz_kernel_read_fn || !yz_kernel_write_fn || !yz_kern_path_fn ||
-	    !yz_close_fd_fn || !yz_task_work_add_fn) {
+	    !yz_path_put_fn || !yz_close_fd_fn || !yz_task_work_add_fn) {
 		pr_err("yukizygisk: required runtime symbol missing: "
 		       "prepare=%d abort=%d override=%d revert=%d open=%d "
-		       "read=%d write=%d kern_path=%d close=%d task_work=%d\n",
+		       "read=%d write=%d kern_path=%d path_put=%d close=%d "
+		       "task_work=%d\n",
 		       !!yz_prepare_creds_fn, !!yz_abort_creds_fn,
 		       !!yz_override_creds_fn, !!yz_revert_creds_fn,
 		       !!yz_filp_open, !!yz_kernel_read_fn,
 		       !!yz_kernel_write_fn, !!yz_kern_path_fn,
-		       !!yz_close_fd_fn, !!yz_task_work_add_fn);
+		       !!yz_path_put_fn, !!yz_close_fd_fn,
+		       !!yz_task_work_add_fn);
 		return -ENOENT;
 	}
 	if (!yz_filp_close)
@@ -341,10 +438,9 @@ int yz_host_runtime_init(void)
 {
 	int ret;
 
-	if (!yz_skip_kallsyms)
-		yz_resolve_kallsyms_lookup();
-	else
-		pr_info("yukizygisk: skipping kallsyms bootstrap\n");
+	ret = yz_init_symbol_resolver();
+	if (ret)
+		return ret;
 
 	ret = yz_resolve_runtime_symbols();
 	if (ret) {
@@ -372,10 +468,12 @@ void yz_host_runtime_exit(void)
 	yz_kernel_read_fn = NULL;
 	yz_kernel_write_fn = NULL;
 	yz_kern_path_fn = NULL;
+	yz_path_put_fn = NULL;
 	yz_close_fd_fn = NULL;
 	yz_task_work_add_fn = NULL;
 	yz_kallsyms_lookup_name = NULL;
+	yz_kallsyms_on_each_symbol = NULL;
+	yz_kallsyms_on_each_match_symbol = NULL;
 	yz_kallsyms_lookup_size_offset_fn = NULL;
 	yz_copy_from_kernel_nofault_fn = NULL;
-	yz_copy_from_kernel_nofault_tried = false;
 }

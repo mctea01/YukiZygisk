@@ -118,7 +118,7 @@ static bool yz_bootstrap_path_exists(const char *path)
 	ret = yz_kern_path(path, 0, &p);
 	if (ret)
 		return false;
-	path_put(&p);
+	yz_path_put(&p);
 	return true;
 }
 

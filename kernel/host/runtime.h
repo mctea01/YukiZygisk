@@ -49,6 +49,7 @@ ssize_t yz_kernel_read(struct file *file, void *buf, size_t count,
 ssize_t yz_kernel_write(struct file *file, const void *buf, size_t count,
 			loff_t *pos);
 int yz_kern_path(const char *name, unsigned int flags, struct path *path);
+void yz_path_put(const struct path *path);
 int yz_close_fd(unsigned int fd);
 
 int yz_host_runtime_init(void);

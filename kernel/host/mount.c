@@ -77,7 +77,7 @@ static YZ_INDIRECT_CALL int yz_try_umount(const char *mnt, int flags)
 		return ret;
 
 	if (path.dentry != path.mnt->mnt_root) {
-		path_put(&path);
+		yz_path_put(&path);
 		return -EINVAL;
 	}
 

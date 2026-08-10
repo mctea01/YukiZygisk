@@ -2,98 +2,75 @@
 /*
  * YukiZygisk - Kernel text and table patch helper.
  *
- * Derived from KernelSU hook/arm64/patch_memory.c and Kasumi patch memory
- * helpers.
+ * Derived from KernelSU hook/arm64/patch_memory.c.
  *
  * License: GPL-2.0-only
  *
  * Author: bmax121 and Anatdx
  */
 
-#include <linux/errno.h>
-#include <linux/types.h>
+#ifndef __aarch64__
+#error "YukiZygisk supports ARM64 kernels only"
+#endif
 
-#include "host/patch_text.h"
-
-#ifdef __aarch64__
-
-#include <linux/atomic.h>
 #include <linux/cpumask.h>
-#include <linux/mm.h>
-#include <linux/printk.h>
+#include <linux/gfp.h>
 #include <linux/stop_machine.h>
-#include <linux/string.h>
+#include <linux/uaccess.h>
 #include <asm/cacheflush.h>
 #include <asm/fixmap.h>
 
+#include "host/patch_text.h"
 #include "host/runtime.h"
 
-typedef void (*yz_set_fixmap_fn)(enum fixed_addresses idx, phys_addr_t phys,
-				 pgprot_t prot);
-typedef void (*yz_dcache_range_fn)(unsigned long start, unsigned long end);
-typedef void (*yz_dcache_area_fn)(void *addr, size_t size);
-
 static struct mm_struct *yz_init_mm;
-static yz_set_fixmap_fn yz_set_fixmap;
-static yz_dcache_range_fn yz_dcache_clean_inval_poc;
-static yz_dcache_range_fn yz_caches_clean_inval_pou;
-static yz_dcache_area_fn yz_flush_dcache_area;
-static yz_dcache_range_fn yz_flush_icache_range;
+static typeof(&__set_fixmap) yz_set_fixmap;
+static typeof(&copy_to_kernel_nofault) yz_copy_to_kernel_nofault;
+#ifdef KSU_HAS_NEW_DCACHE_FLUSH
+static typeof(&dcache_clean_inval_poc) yz_dcache_clean_inval_poc;
+static typeof(&caches_clean_inval_pou) yz_caches_clean_inval_pou;
+#else
+static typeof(&__flush_dcache_area) yz_flush_dcache_area;
+static typeof(&__flush_icache_range) yz_flush_icache_range;
+#endif
 
 static int yz_patch_resolve_symbols(void)
 {
 	if (!yz_init_mm)
-		yz_init_mm = (void *)yz_lookup_name("init_mm");
+		yz_init_mm = (void *)yz_lookup_name_quiet("init_mm");
 	if (!yz_set_fixmap)
 		yz_set_fixmap =
-			(void *)yz_lookup_callable("__set_fixmap");
+			(void *)yz_lookup_callable_quiet("__set_fixmap");
+	if (!yz_copy_to_kernel_nofault)
+		yz_copy_to_kernel_nofault =
+			(void *)yz_lookup_callable_quiet(
+				"copy_to_kernel_nofault");
+#ifdef KSU_HAS_NEW_DCACHE_FLUSH
 	if (!yz_dcache_clean_inval_poc)
 		yz_dcache_clean_inval_poc =
 			(void *)yz_lookup_callable_quiet(
 				"dcache_clean_inval_poc");
-	if (!yz_flush_dcache_area)
-		yz_flush_dcache_area =
-			(void *)yz_lookup_callable_quiet("__flush_dcache_area");
 	if (!yz_caches_clean_inval_pou)
 		yz_caches_clean_inval_pou =
 			(void *)yz_lookup_callable_quiet(
 				"caches_clean_inval_pou");
+	if (!yz_init_mm || !yz_set_fixmap || !yz_copy_to_kernel_nofault ||
+	    !yz_dcache_clean_inval_poc || !yz_caches_clean_inval_pou)
+#else
+	if (!yz_flush_dcache_area)
+		yz_flush_dcache_area =
+			(void *)yz_lookup_callable_quiet(
+				"__flush_dcache_area");
 	if (!yz_flush_icache_range)
 		yz_flush_icache_range =
-			(void *)yz_lookup_callable_quiet("__flush_icache_range");
-
-	if (!yz_init_mm || !yz_set_fixmap) {
-		pr_err("yukizygisk: patch_text missing init_mm=%px __set_fixmap=%px\n",
-		       yz_init_mm, yz_set_fixmap);
+			(void *)yz_lookup_callable_quiet(
+				"__flush_icache_range");
+	if (!yz_init_mm || !yz_set_fixmap || !yz_copy_to_kernel_nofault ||
+	    !yz_flush_dcache_area || !yz_flush_icache_range)
+#endif
 		return -ENOENT;
-	}
+
 	return 0;
-}
-
-static YZ_INDIRECT_CALL void yz_patch_flush_dcache(unsigned long start,
-					    size_t size)
-{
-	if (yz_dcache_clean_inval_poc) {
-		yz_dcache_clean_inval_poc(start, start + size);
-		return;
-	}
-	if (yz_flush_dcache_area) {
-		yz_flush_dcache_area((void *)start, size);
-		return;
-	}
-	if (yz_caches_clean_inval_pou)
-		yz_caches_clean_inval_pou(start, start + size);
-}
-
-static YZ_INDIRECT_CALL void yz_patch_flush_icache(unsigned long start,
-					    size_t size)
-{
-	if (yz_flush_icache_range) {
-		yz_flush_icache_range(start, start + size);
-		return;
-	}
-	if (yz_caches_clean_inval_pou)
-		yz_caches_clean_inval_pou(start, start + size);
 }
 
 static unsigned long yz_phys_from_virt(unsigned long addr, int *err)
@@ -148,6 +125,26 @@ fail:
 	return 0;
 }
 
+/* Arm64 cache helpers may be assembly entries without KCFI type IDs. */
+static YZ_INDIRECT_CALL void yz_flush_dcache(unsigned long start, size_t size)
+{
+#ifdef KSU_HAS_NEW_DCACHE_FLUSH
+	yz_dcache_clean_inval_poc(start, start + size);
+#else
+	yz_flush_dcache_area((void *)start, size);
+#endif
+}
+
+static YZ_INDIRECT_CALL void yz_flush_icache(unsigned long start,
+					      unsigned long end)
+{
+#ifdef KSU_HAS_NEW_DCACHE_FLUSH
+	yz_caches_clean_inval_pou(start, end);
+#else
+	yz_flush_icache_range(start, end);
+#endif
+}
+
 struct yz_patch_text_info {
 	void *dst;
 	void *src;
@@ -156,13 +153,13 @@ struct yz_patch_text_info {
 	int flags;
 };
 
-static YZ_INDIRECT_CALL int yz_patch_text_nosync(void *dst, void *src,
-						 size_t len, int flags)
+static int yz_patch_text_nosync(void *dst, void *src, size_t len, int flags)
 {
 	unsigned long target = (unsigned long)dst;
 	unsigned long phys;
 	void *map;
 	int phys_err;
+	int ret;
 
 	phys = yz_phys_from_virt(target, &phys_err);
 	if (phys_err) {
@@ -173,15 +170,17 @@ static YZ_INDIRECT_CALL int yz_patch_text_nosync(void *dst, void *src,
 
 	yz_set_fixmap(FIX_TEXT_POKE0, phys, FIXMAP_PAGE_NORMAL);
 	map = (void *)(fix_to_virt(FIX_TEXT_POKE0) + (phys & ~PAGE_MASK));
-	memcpy(map, src, len);
+	ret = (int)yz_copy_to_kernel_nofault(map, src, len);
 	yz_set_fixmap(FIX_TEXT_POKE0, 0, FIXMAP_PAGE_CLEAR);
 
-	if (flags & YZ_PATCH_TEXT_FLUSH_ICACHE)
-		yz_patch_flush_icache(target, len);
-	if (flags & YZ_PATCH_TEXT_FLUSH_DCACHE)
-		yz_patch_flush_dcache(target, len);
+	if (!ret) {
+		if (flags & YZ_PATCH_TEXT_FLUSH_ICACHE)
+			yz_flush_icache(target, target + len);
+		if (flags & YZ_PATCH_TEXT_FLUSH_DCACHE)
+			yz_flush_dcache(target, len);
+	}
 
-	return 0;
+	return ret;
 }
 
 static int yz_patch_text_cb(void *arg)
@@ -214,21 +213,10 @@ int yz_patch_text(void *dst, void *src, size_t len, int flags)
 	int ret;
 
 	ret = yz_patch_resolve_symbols();
-	if (ret)
+	if (ret) {
+		pr_err("yukizygisk: patch_text infrastructure unavailable\n");
 		return ret;
+	}
 
 	return stop_machine(yz_patch_text_cb, &info, cpu_online_mask);
 }
-
-#else
-
-int yz_patch_text(void *dst, void *src, size_t len, int flags)
-{
-	(void)dst;
-	(void)src;
-	(void)len;
-	(void)flags;
-	return -EOPNOTSUPP;
-}
-
-#endif /* __aarch64__ */
