@@ -452,7 +452,9 @@ yz_diag_prune_reports() {
 	set -- "$reports_dir"/YukiZygisk_report_*.tar.gz
 	[ -e "$1" ] || return 0
 	while [ "$#" -gt 3 ]; do
-		yz_diag_safe_file "$1" && rm -f "$1" 2>/dev/null || true
+		if yz_diag_safe_file "$1"; then
+			rm -f "$1" 2>/dev/null || true
+		fi
 		shift
 	done
 }
