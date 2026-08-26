@@ -12,6 +12,9 @@ project(zygisk_core VERSION 1.0.0 LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(YUKIZYGISK_CXX_SLIM
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../common/cxx_slim.cpp)
+
 if(NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a" AND
    NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
     message(FATAL_ERROR
@@ -50,6 +53,7 @@ add_subdirectory(
 target_compile_definitions(lsplt_static PRIVATE LOG_DISABLED)
 
 add_library(zygisk SHARED
+    ${YUKIZYGISK_CXX_SLIM}
     src/core.cpp
     src/hook.cpp
     ${YUKIZYGISK_RUNTIME_LOG_SOURCES}
@@ -106,6 +110,7 @@ target_link_options(zygisk PRIVATE -Wl,--gc-sections -Wl,--strip-all
                     -Wl,--as-needed)
 
 add_library(yukizncore SHARED
+    ${YUKIZYGISK_CXX_SLIM}
     src/yukizncore.cpp
     src/yukilinker.cpp
     ${YUKILINKER_ARCH_SOURCES}
@@ -146,6 +151,7 @@ target_link_options(yukizncore PRIVATE -Wl,--gc-sections -Wl,--strip-all
 # yuki_dlopen_memfd/dlsym/dlclose). Same source as compiled-in; no lsplt/solist
 # deps.
 add_library(yukilinker SHARED
+    ${YUKIZYGISK_CXX_SLIM}
     src/yukilinker.cpp
     ${YUKIZYGISK_RUNTIME_LOG_SOURCES}
     ${YUKILINKER_ARCH_SOURCES})

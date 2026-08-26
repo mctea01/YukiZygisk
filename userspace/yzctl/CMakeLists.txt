@@ -7,6 +7,7 @@
 # Author: Anatdx
 
 add_executable(yzctl
+  ${PROJECT_SOURCE_DIR}/userspace/common/cxx_slim.cpp
   host.cpp
   main.cpp
   status.cpp
