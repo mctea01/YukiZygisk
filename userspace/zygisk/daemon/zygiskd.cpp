@@ -61,6 +61,9 @@
 
 namespace {
 
+constexpr int kZnApiVersion3 = 3;
+constexpr int kZnApiVersion4 = 4;
+
 #if defined(YUKIZYGISK_RUNTIME_LOG)
 #define DLOGE(...)                                                             \
   zygiskd::logging::writef(zygiskd::LogLevel::Error,                           \
@@ -873,7 +876,8 @@ void *native_companion_thread(void *p) {
   auto *mod = h ? reinterpret_cast<ZygiskNextCompanionModule *>(
                       dlsym(h, "zn_companion_module"))
                 : nullptr;
-  bool valid = mod != nullptr && mod->target_api_version == 3;
+  bool valid = mod != nullptr && (mod->target_api_version == kZnApiVersion3 ||
+                                  mod->target_api_version == kZnApiVersion4);
   if (valid && mod->onCompanionLoaded != nullptr)
     mod->onCompanionLoaded();
 
