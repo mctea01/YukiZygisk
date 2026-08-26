@@ -38,6 +38,32 @@ if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
 endif()
 
 if(ANDROID)
+  target_compile_options(
+    ${ZYGISKD_TARGET}
+    PRIVATE
+      -Os
+      -flto=full
+      -ffunction-sections
+      -fdata-sections
+      -fvisibility=hidden
+      -fvisibility-inlines-hidden
+      -fno-ident
+      -fno-semantic-interposition
+  )
+  target_link_options(
+    ${ZYGISKD_TARGET}
+    PRIVATE
+      -fuse-ld=lld
+      -flto=full
+      -Wl,--gc-sections
+      -Wl,--icf=all
+      -Wl,--strip-all
+      -Wl,--exclude-libs,ALL
+      -Wl,-O2
+      -Wl,--lto-O3
+      -Wl,--hash-style=gnu
+      -Wl,--build-id=none
+  )
   target_link_libraries(${ZYGISKD_TARGET} PRIVATE dl)
 else()
   find_package(Threads REQUIRED)

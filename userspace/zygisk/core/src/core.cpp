@@ -36,7 +36,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <deque>
 #include <vector>
 
 using zygisk::Option;
@@ -70,10 +69,10 @@ struct Module {
   CoreApiTable api{};  // per-module, filled by RegisterModuleImpl
 };
 
-std::deque<Module> g_modules; // deque: refs stay stable as modules register
-Module *g_cur = nullptr;      // module currently in onLoad/pre/post
-Module *g_loading = nullptr;  // module currently being registered
-int g_loading_id = -1;        // zygiskd index of the module being loaded
+std::vector<Module> g_modules;
+Module *g_cur = nullptr;     // module currently in onLoad/pre/post
+Module *g_loading = nullptr; // module currently being registered
+int g_loading_id = -1;       // zygiskd index of the module being loaded
 
 // zygiskd-backed helpers.
 int zd_module_dir(int id);
@@ -478,6 +477,18 @@ void load_modules_impl(JNIEnv *env) {
   }
   close(sock);
   LOGI("zygiskd reports %u module(s)", count);
+
+  /*
+   * Module callbacks retain pointers into this storage. Reserve once before
+   * the first append, after bounding the untrusted daemon count, so they stay
+   * valid for the full process lifetime.
+   */
+  constexpr uint32_t kMaxModules = 1024;
+  if (count > kMaxModules) {
+    LOGE("zygiskd reported %u modules, clamping to %u", count, kMaxModules);
+    count = kMaxModules;
+  }
+  g_modules.reserve(count);
 
   // Arm the temporary module-load policy before receiving the first module
   // image. On policies without the memfd_file class, SCM_RIGHTS reception of
