@@ -24,7 +24,7 @@ fi
 
 ABI="arm64-v8a"
 KMI="$(cat "$PROJECT_ROOT/.ddk-version" 2>/dev/null || echo android16-6.12)"
-ANDROID_PLATFORM="android-29"
+ANDROID_PLATFORM="android-31"
 ANDROID_NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
 SKIP_KERNEL=false
 SKIP_DAEMON=false
@@ -56,7 +56,7 @@ Options:
   -k, --kmi KMI              Build/package one DDK target (default: .ddk-version)
       --all-kmis             Build/package every supported KMI
   -a, --abi ABI              Primary device ABI; compat ARM is always included
-      --android-platform API Android platform for daemon (default: android-29)
+      --android-platform API Android platform (default: android-31)
       --ndk PATH             Android NDK path
       --skip-kernel          Reuse KMI-tagged modules in build/out/lkm
       --skip-daemon          Reuse build/out/zygiskd64 and zygiskd32
@@ -253,6 +253,20 @@ validate_kmi() {
 		die "invalid KMI target: $target"
 }
 
+validate_android_platform() {
+	local api
+	if [[ "$ANDROID_PLATFORM" =~ ^android-([0-9]+)$ ]]; then
+		api=$((10#${BASH_REMATCH[1]}))
+	elif [[ "$ANDROID_PLATFORM" =~ ^[0-9]+$ ]]; then
+		api=$((10#$ANDROID_PLATFORM))
+		ANDROID_PLATFORM="android-$api"
+	else
+		die "invalid Android platform: $ANDROID_PLATFORM"
+	fi
+	((api >= 31 && api < 10000)) ||
+		die "Android platform must be a concrete API level >= 31"
+}
+
 lkm_output_path() {
 	printf '%s/%s_yukizygisk.ko\n' "$LKM_OUT_DIR" "$1"
 }
@@ -441,6 +455,8 @@ build_ctl() {
 	strip_android_file --strip-all "$OUT_DIR/yzctl"
 	chmod 0755 "$OUT_DIR/yzctl"
 }
+
+validate_android_platform
 
 [[ "$ABI" == "arm64-v8a" ]] ||
 	die "standalone packages require an arm64-v8a device with optional ARM compat"

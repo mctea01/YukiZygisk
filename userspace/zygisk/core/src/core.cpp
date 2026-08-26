@@ -7,6 +7,8 @@
  * Author: Anatdx
  */
 
+#include <lsplt.hpp>
+
 #include "hook.hpp"
 #include "log.hpp"
 #include "solist.hpp"
@@ -34,7 +36,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <deque>
 #include <vector>
 
 using zygisk::Option;
@@ -68,10 +69,10 @@ struct Module {
   CoreApiTable api{};  // per-module, filled by RegisterModuleImpl
 };
 
-std::deque<Module> g_modules; // deque: refs stay stable as modules register
-Module *g_cur = nullptr;      // module currently in onLoad/pre/post
-Module *g_loading = nullptr;  // module currently being registered
-int g_loading_id = -1;        // zygiskd index of the module being loaded
+std::vector<Module> g_modules;
+Module *g_cur = nullptr;     // module currently in onLoad/pre/post
+Module *g_loading = nullptr; // module currently being registered
+int g_loading_id = -1;       // zygiskd index of the module being loaded
 
 // zygiskd-backed helpers.
 int zd_module_dir(int id);
@@ -98,26 +99,12 @@ void api_plt_hook_register_byname(const char *path_regex, const char *symbol,
   regex_t re;
   if (regcomp(&re, path_regex, REG_NOSUB) != 0)
     return;
-  FILE *f = fopen("/proc/self/maps", "re");
-  if (f == nullptr) {
-    regfree(&re);
-    return;
-  }
-  char line[512];
-  while (fgets(line, sizeof(line), f) != nullptr) {
-    unsigned long start = 0, end = 0, off = 0, inode = 0;
-    unsigned int maj = 0, min = 0;
-    char perms[8] = {}, path[256] = {};
-    if (sscanf(line, "%lx-%lx %7s %lx %x:%x %lu %255s", &start, &end, perms,
-               &off, &maj, &min, &inode, path) != 8)
+  for (const auto &map : lsplt::MapInfo::ScanCached()) {
+    if (map.offset != 0 || !(map.perms & PROT_READ) || map.inode == 0)
       continue;
-    if (off != 0 || perms[0] != 'r' || inode == 0)
-      continue;
-    if (regexec(&re, path, 0, nullptr, 0) == 0)
-      zygisk_plt_hook_register(makedev(maj, min), static_cast<ino_t>(inode),
-                               symbol, new_func, old_func);
+    if (regexec(&re, map.path.c_str(), 0, nullptr, 0) == 0)
+      zygisk_plt_hook_register(map.dev, map.inode, symbol, new_func, old_func);
   }
-  fclose(f);
   regfree(&re);
 }
 
@@ -491,6 +478,18 @@ void load_modules_impl(JNIEnv *env) {
   close(sock);
   LOGI("zygiskd reports %u module(s)", count);
 
+  /*
+   * Module callbacks retain pointers into this storage. Reserve once before
+   * the first append, after bounding the untrusted daemon count, so they stay
+   * valid for the full process lifetime.
+   */
+  constexpr uint32_t kMaxModules = 1024;
+  if (count > kMaxModules) {
+    LOGE("zygiskd reported %u modules, clamping to %u", count, kMaxModules);
+    count = kMaxModules;
+  }
+  g_modules.reserve(count);
+
   // Arm the temporary module-load policy before receiving the first module
   // image. On policies without the memfd_file class, SCM_RIGHTS reception of
   // zygiskd's read-only memfd requires temporary tmpfs:file access for the
@@ -544,7 +543,8 @@ void load_modules_impl(JNIEnv *env) {
           LOGI("module %u using system linker fallback", i);
           entry = reinterpret_cast<module_entry_fn>(
               dlsym(handle, "zygisk_module_entry"));
-          int anonymized = yuki::solist::spoof_fd_maps(mfd, true);
+          int anonymized = yuki::solist::spoof_loaded_object_maps(
+              reinterpret_cast<uintptr_t>(entry));
           LOGI("module %u system fallback anonymized %d segment(s)", i,
                anonymized);
         }
@@ -767,6 +767,8 @@ static void core_start(const char *self_path) {
   const uint32_t runtime_generation =
       zd_get_runtime_generation(YZ_RUNTIME_KIND_ZYGOTE);
   LOGI("core start, self=%s", self_path ? self_path : "(null)");
+  if (!yuki::solist::prepare_linker())
+    LOGE("linker internals unavailable; solist cleanup disabled");
   if (zygisk_hook_bootstrap(self_path))
     zd_report_zygote(runtime_generation);
   zd_restore_load_policy();
@@ -1182,11 +1184,11 @@ void zygisk_self_destruct(JNIEnv *env, bool isolated, bool revert_mounts) {
   if (!isolated) {
     yuki::solist::hide_from_solist("libzygisk");
     yuki::solist::hide_from_solist("libyukilinker");
-    if (revert_mounts) {
-      bool reverted = yz_report_self_unmap();
-      if (!reverted)
-        yz_revert_self_mounts();
-    }
+  }
+  if (revert_mounts) {
+    bool reverted = yz_report_self_unmap();
+    if (!reverted)
+      yz_revert_self_mounts();
   }
   if (!fully_inline_hooked)
     LOGE("self-unmap unavailable: specialize used RegisterNatives fallback");

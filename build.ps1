@@ -356,8 +356,8 @@ function Build-Userspace {
 	$buildDirArm64 = Join-Path $script:RepoRoot 'build-win-arm64'
 	$buildDirArmv7 = Join-Path $script:RepoRoot 'build-win-armv7'
 
-	Build-CMakeProject -Name 'YukiZygisk payload + daemon + yzctl (arm64)' -SourceDirectory $script:RepoRoot -BuildDirectory $buildDirArm64 -Abi $script:Abi -Platform 26
-	Build-CMakeProject -Name 'YukiZygisk payload + daemon (armv7)' -SourceDirectory $script:RepoRoot -BuildDirectory $buildDirArmv7 -Abi 'armeabi-v7a' -Platform 26
+	Build-CMakeProject -Name 'YukiZygisk payload + daemon + yzctl (arm64)' -SourceDirectory $script:RepoRoot -BuildDirectory $buildDirArm64 -Abi $script:Abi -Platform 31
+	Build-CMakeProject -Name 'YukiZygisk payload + daemon (armv7)' -SourceDirectory $script:RepoRoot -BuildDirectory $buildDirArmv7 -Abi 'armeabi-v7a' -Platform 31
 
 	New-Item -ItemType Directory -Path $script:OutDir -Force | Out-Null
 	Copy-RequiredFile -Source (Join-Path $buildDirArm64 'userspace/zygisk/core/libzygisk64.so') -Destination (Join-Path $script:OutDir 'libzygisk64.so')

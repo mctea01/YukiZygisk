@@ -32,6 +32,7 @@
 #include "host/runtime.h"
 
 #define YZ_PER_USER_RANGE 100000
+#define YZ_AID_WEBVIEW_ZYGOTE 1053
 #define YZ_UMOUNT_MAX_TARGETS 512
 #define YZ_MOUNTINFO_BUF (256 * 1024)
 
@@ -41,7 +42,8 @@ static yz_path_umount_fn yz_path_umount_ptr;
 
 static bool yz_mount_is_appuid(uid_t uid)
 {
-	return uid % YZ_PER_USER_RANGE >= 10000;
+	return uid == YZ_AID_WEBVIEW_ZYGOTE ||
+	       uid % YZ_PER_USER_RANGE >= 10000;
 }
 
 static int yz_mount_resolve_path_umount(void)

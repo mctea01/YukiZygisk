@@ -12,6 +12,9 @@
 
 namespace yuki::solist {
 
+/* Resolve linker internals before the zygote forks app namespaces. */
+bool prepare_linker();
+
 /* Unlink matching soinfo entries. */
 int hide_from_solist(const char *path_substr);
 
@@ -27,6 +30,9 @@ int spoof_virtual_maps(const char *path_substr, bool private_only);
 
 /* Anonymize VMAs backed by one exact open fd. */
 int spoof_fd_maps(int fd, bool private_only);
+
+/* Anonymize file-backed segments of the loaded object containing an address. */
+int spoof_loaded_object_maps(uintptr_t address);
 
 /* Name bare executable anonymous VMAs. */
 int name_anonymous_exec();

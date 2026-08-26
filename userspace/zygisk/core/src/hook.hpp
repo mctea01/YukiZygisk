@@ -21,8 +21,6 @@ void zygisk_revert_mounts();
 bool zygisk_self_unhook(JNIEnv *env);
 void yz_drop_runtime_header_pages();
 bool zygisk_specialize_fully_inline_hooked();
-int zygisk_collect_path_segs(const char *substr, uint64_t *addr, uint64_t *size,
-                             int max);
 void zygisk_self_destruct(JNIEnv *env, bool isolated, bool revert_mounts);
 bool zygisk_app_core_unload_safe();
 void zygisk_load_modules(JNIEnv *env);
