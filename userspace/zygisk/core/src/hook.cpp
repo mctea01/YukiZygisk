@@ -17,6 +17,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <link.h>
 #include <sched.h>
 #include <string_view>
 #include <sys/mman.h>
@@ -50,6 +51,47 @@ bool g_jni_hooked = false;
 
 void hook_zygote_jni();
 
+struct RuntimeHeaderRange {
+  uintptr_t start = 0;
+  size_t size = 0;
+};
+
+struct RuntimeMapCache {
+  dev_t dev = 0;
+  ino_t inode = 0;
+  bool ready = false;
+};
+
+RuntimeMapCache g_runtime_maps;
+
+int find_runtime_header(dl_phdr_info *info, size_t, void *data) {
+  if (info == nullptr || info->dlpi_name == nullptr ||
+      !ends_with(info->dlpi_name, kAndroidRuntime))
+    return 0;
+
+  auto *range = static_cast<RuntimeHeaderRange *>(data);
+  const uintptr_t page_size = static_cast<uintptr_t>(getpagesize());
+  if (page_size == 0 || (page_size & (page_size - 1)) != 0)
+    return 0;
+  for (size_t i = 0; i < info->dlpi_phnum; ++i) {
+    const ElfW(Phdr) &ph = info->dlpi_phdr[i];
+    if (ph.p_type != PT_LOAD || ph.p_offset != 0 || ph.p_flags != PF_R ||
+        ph.p_filesz == 0 || ph.p_vaddr > UINTPTR_MAX - info->dlpi_addr)
+      continue;
+    uintptr_t segment = static_cast<uintptr_t>(info->dlpi_addr + ph.p_vaddr);
+    if (ph.p_filesz > UINTPTR_MAX - segment ||
+        segment + ph.p_filesz > UINTPTR_MAX - (page_size - 1))
+      continue;
+    uintptr_t start = segment & ~(page_size - 1);
+    uintptr_t end = (segment + ph.p_filesz + page_size - 1) & ~(page_size - 1);
+    if (end > start) {
+      *range = {start, end - start};
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* ZygoteInit means JNI is ready. */
 char *new_strdup(const char *str) {
   if (!g_jni_hooked && str != nullptr && std::strcmp(str, kZygoteInit) == 0) {
@@ -60,15 +102,25 @@ char *new_strdup(const char *str) {
   return g_strdup.original ? g_strdup.original(str) : nullptr;
 }
 
-bool find_libandroid_runtime(dev_t &dev, ino_t &inode) {
-  for (const auto &m : lsplt::MapInfo::Scan()) {
-    if (ends_with(m.path, kAndroidRuntime)) {
-      dev = m.dev;
-      inode = m.inode;
-      return true;
-    }
+bool cache_libandroid_runtime() {
+  if (g_runtime_maps.ready)
+    return true;
+  for (const auto &map : lsplt::MapInfo::Scan()) {
+    if (map.offset != 0 || !(map.perms & PROT_READ) || map.dev == 0 ||
+        map.inode == 0 || !ends_with(map.path, kAndroidRuntime))
+      continue;
+    g_runtime_maps = {map.dev, map.inode, true};
+    return true;
   }
   return false;
+}
+
+bool find_libandroid_runtime(dev_t &dev, ino_t &inode) {
+  if (!g_runtime_maps.ready)
+    return false;
+  dev = g_runtime_maps.dev;
+  inode = g_runtime_maps.inode;
+  return true;
 }
 
 struct ZygiskContext {
@@ -839,25 +891,23 @@ void hook_zygote_jni() {
 
 /* Drop libandroid_runtime header pages faulted by symbol scans. */
 void yz_drop_runtime_header_pages() {
-  for (const auto &m : lsplt::MapInfo::Scan()) {
-    if (m.offset == 0 && m.perms == PROT_READ &&
-        ends_with(m.path, kAndroidRuntime)) {
-      madvise(reinterpret_cast<void *>(m.start),
-              static_cast<size_t>(m.end - m.start), MADV_DONTNEED);
-    }
-  }
+  RuntimeHeaderRange range;
+  if (dl_iterate_phdr(find_runtime_header, &range) != 0 && range.size != 0)
+    madvise(reinterpret_cast<void *>(range.start), range.size, MADV_DONTNEED);
 }
 
 /* Install the early strdup hook. */
 bool zygisk_hook_bootstrap(const char *self_path) {
   ZLOGI("hook bootstrap, self=%s", self_path ? self_path : "(null)");
 
-  dev_t dev = 0;
-  ino_t inode = 0;
-  if (!find_libandroid_runtime(dev, inode)) {
+  if (!cache_libandroid_runtime()) {
     ZLOGE("libandroid_runtime.so not mapped yet; cannot bootstrap");
     return false;
   }
+  dev_t dev = 0;
+  ino_t inode = 0;
+  if (!find_libandroid_runtime(dev, inode))
+    return false;
 
   if (!lsplt::RegisterHook(dev, inode, "strdup",
                            reinterpret_cast<void *>(new_strdup),
@@ -865,7 +915,7 @@ bool zygisk_hook_bootstrap(const char *self_path) {
     ZLOGE("RegisterHook(strdup) failed");
     return false;
   }
-  if (!lsplt::CommitHook()) {
+  if (!lsplt::CommitHook() || g_strdup.original == nullptr) {
     ZLOGE("CommitHook failed");
     return false;
   }
@@ -885,7 +935,7 @@ bool zygisk_plt_hook_register(dev_t dev, ino_t inode, const char *symbol,
   return lsplt::RegisterHook(dev, inode, symbol, new_func, old_func);
 }
 
-bool zygisk_plt_hook_commit() { return lsplt::CommitHook(); }
+bool zygisk_plt_hook_commit() { return lsplt::CommitHookCached(); }
 
 bool zygisk_exempt_fd(int fd) {
   if (g_ctx == nullptr || g_ctx->fds_to_ignore == nullptr || fd < 0)
@@ -935,7 +985,7 @@ bool zygisk_self_unhook(JNIEnv *env) {
         registered = false;
     }
     if (have_hook) {
-      const bool committed = lsplt::CommitHook();
+      const bool committed = lsplt::CommitHookCached();
       if (!registered || !committed)
         unhooked = false;
     }
@@ -946,21 +996,4 @@ bool zygisk_self_unhook(JNIEnv *env) {
   if (nc != 0)
     ZLOGI("self-destruct: closed %d leaked module fd", nc);
   return unhooked;
-}
-
-/* Collect matching maps segments. */
-int zygisk_collect_path_segs(const char *substr, uint64_t *addr, uint64_t *size,
-                             int max) {
-  auto maps = lsplt::MapInfo::Scan();
-  int n = 0;
-  for (auto &m : maps) {
-    if (n >= max)
-      break;
-    if (!m.path.empty() && m.path.find(substr) != std::string::npos) {
-      addr[n] = m.start;
-      size[n] = m.end - m.start;
-      ++n;
-    }
-  }
-  return n;
 }

@@ -22,10 +22,8 @@
 #include <inttypes.h>
 #include <linux/netlink.h>
 #include <poll.h>
-#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -49,7 +47,6 @@
 #include <cstring>
 #include <fstream>
 #include <limits.h>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -949,74 +946,6 @@ bool ensure_native_companion(uint32_t idx) {
   return c.has_entry;
 }
 
-static bool yz_mi_parse(const std::string &line, std::string &root,
-                        std::string &target, std::string &source) {
-  std::istringstream iss(line);
-  std::vector<std::string> tok;
-  std::string t;
-  while (iss >> t)
-    tok.push_back(t);
-  if (tok.size() < 7)
-    return false;
-  size_t dash = 0;
-  bool found = false;
-  for (size_t i = 5; i < tok.size(); ++i)
-    if (tok[i] == "-") {
-      dash = i;
-      found = true;
-      break;
-    }
-  if (!found || dash + 2 >= tok.size())
-    return false;
-  root = tok[3];
-  target = tok[4];
-  source = tok[dash + 2]; /* dash+1 = fstype, dash+2 = mount source */
-  return true;
-}
-
-static void yz_umount_root_in_ns() {
-  std::ifstream f("/proc/self/mountinfo");
-  if (!f.is_open())
-    return;
-  std::vector<std::string> targets;
-  std::string line;
-  while (std::getline(f, line)) {
-    std::string root, target, source;
-    if (!yz_mi_parse(line, root, target, source))
-      continue;
-    bool should = source == "KSU" || source == "magisk" || source == "APatch" ||
-                  target.rfind("/data/adb/", 0) == 0 ||
-                  root.rfind("/adb/modules", 0) == 0;
-    if (should)
-      targets.push_back(target);
-  }
-  for (auto it = targets.rbegin(); it != targets.rend(); ++it)
-    umount2(it->c_str(), MNT_DETACH);
-}
-
-static bool yz_revert_app_mounts(pid_t app_pid) {
-  if (app_pid <= 0)
-    return false;
-  pid_t child = fork();
-  if (child < 0)
-    return false;
-  if (child == 0) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/ns/mnt", app_pid);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-      _exit(1);
-    if (setns(fd, CLONE_NEWNS) != 0)
-      _exit(2);
-    close(fd);
-    yz_umount_root_in_ns();
-    _exit(0);
-  }
-  int st = 0;
-  waitpid(child, &st, 0);
-  return WIFEXITED(st) && WEXITSTATUS(st) == 0;
-}
-
 yz_config g_yz_config{1, 0, 0, 0};
 
 uint32_t query_flags(uint32_t uid) {
@@ -1233,8 +1162,11 @@ void handle_client(int client) {
     socklen_t crlen = sizeof(cr);
     uint8_t ok = 0;
     if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) == 0 &&
-        cr.pid > 0)
-      ok = yz_revert_app_mounts(static_cast<pid_t>(cr.pid)) ? 1 : 0;
+        cr.pid > 0) {
+      yz_umount_pid_cmd cmd{};
+      cmd.pid = static_cast<uint32_t>(cr.pid);
+      ok = yzhost::ctl(YZ_IOCTL_UMOUNT_PID, &cmd) == 0 ? 1 : 0;
+    }
     write_exact(client, &ok, sizeof(ok));
     break;
   }
