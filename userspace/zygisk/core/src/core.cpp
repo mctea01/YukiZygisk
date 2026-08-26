@@ -1184,11 +1184,11 @@ void zygisk_self_destruct(JNIEnv *env, bool isolated, bool revert_mounts) {
   if (!isolated) {
     yuki::solist::hide_from_solist("libzygisk");
     yuki::solist::hide_from_solist("libyukilinker");
-    if (revert_mounts) {
-      bool reverted = yz_report_self_unmap();
-      if (!reverted)
-        yz_revert_self_mounts();
-    }
+  }
+  if (revert_mounts) {
+    bool reverted = yz_report_self_unmap();
+    if (!reverted)
+      yz_revert_self_mounts();
   }
   if (!fully_inline_hooked)
     LOGE("self-unmap unavailable: specialize used RegisterNatives fallback");

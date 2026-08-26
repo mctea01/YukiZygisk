@@ -160,10 +160,11 @@ void finish_app_child(JNIEnv *env, bool is_child_zygote, bool isolated,
     zygisk_revert_mounts();
     revert_mounts = false;
   }
-  if (is_child_zygote)
+  if (is_child_zygote || !zygisk_app_core_unload_safe()) {
+    if (revert_mounts)
+      zygisk_revert_mounts();
     return;
-  if (!zygisk_app_core_unload_safe())
-    return;
+  }
   zygisk_self_destruct(env, isolated, revert_mounts);
 }
 
